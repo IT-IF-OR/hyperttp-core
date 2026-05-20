@@ -7,7 +7,7 @@
 ## 🌐 Language / Язык
 
 - 🇺🇸 [English](https://github.com/IT-IF-OR/hyperttp-core)
-- 🇷🇺 [Русский](https://github.com/IT-IF-OR/hyperttp-core/lang/ru)
+- 🇷🇺 [Русский](https://github.com/IT-IF-OR/hyperttp-core/tree/main/lang/ru)
 
 ---
 
