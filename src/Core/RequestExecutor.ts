@@ -112,7 +112,7 @@ export class RequestExecutor {
     if (codes && codes.length > 0) {
       return codes.includes(status);
     }
-    return status === 429 || status >= 500;
+    return status === 502 || status === 503 || status === 504;
   }
 
   private async executeCore<TBody>(
