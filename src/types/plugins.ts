@@ -34,19 +34,9 @@ export type PluginPhase =
    */
   | "NETWORK";
 
-export interface HyperPlugin {
+export interface HyperPlugin<T extends HyperCore = HyperCore> {
   name: string;
-  /**
-   * @ru
-   * Фазы жизненного цикла запроса (выполняются строго по очереди от начала до отправки).
-   * Конвейер запроса: START -> PREPARE -> CONTROL -> FORMAT -> SEND.
-   * Конвейер ответа:  SEND -> FORMAT -> CONTROL -> PREPARE -> START.
-   * @en
-   * Request lifecycle phases (executed strictly in order from start to dispatch).
-   * Request pipeline: START -> PREPARE -> CONTROL -> FORMAT -> SEND.
-   * Response pipeline: SEND -> FORMAT -> CONTROL -> PREPARE -> START.
-   */
   phase: PluginPhase;
   enabled: (config: HttpClientOptions) => boolean;
-  apply: (client: HyperCore, config: HttpClientOptions) => HyperCore;
+  apply: (client: HyperCore, config: HttpClientOptions) => T;
 }
