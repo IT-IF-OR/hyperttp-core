@@ -1,5 +1,6 @@
 import type { LogLevel } from "./http.js";
 import type { NetworkOptions } from "./network.js";
+import type { HyperPlugin } from "./plugins.js";
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface HyperttpPluginsExtension {}
@@ -40,7 +41,7 @@ export interface BaseHttpClientOptions {
    * @ru Список явно подключенных плагинов (готовые объекты или строки с именами npm-пакетов)
    * @en List of explicitly registered plugins (direct objects or npm package name strings)
    */
-  plugins?: any[];
+  plugins?: (HyperPlugin | string)[];
 
   trackMetrics?: any;
 }
