@@ -12,3 +12,4 @@ export type * from "./types/request.js";
 export type * from "./types/stream.js";
 export type * from "./types/metrics.js";
 export type * from "./types/errors.js";
+export type * from "./types/plugins.js";
