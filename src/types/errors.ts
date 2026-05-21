@@ -30,3 +30,9 @@ export class RateLimitError extends HttpClientError {
     );
   }
 }
+
+export interface HyperttpError extends Error {
+  code?: string;
+  status?: number;
+  statusCode?: number;
+}

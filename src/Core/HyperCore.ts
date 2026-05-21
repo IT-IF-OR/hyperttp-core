@@ -71,8 +71,8 @@ export class HyperCore {
     });
 
     const retryOptions: RetryOptions = {
-      maxRetries: (config as any).retry?.maxRetries ?? 3,
-      ...(config as any).retry,
+      maxRetries: config.retry?.maxRetries ?? 3,
+      ...config.retry,
     };
 
     const network = config.network;

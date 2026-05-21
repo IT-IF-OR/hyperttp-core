@@ -1,6 +1,7 @@
 import type { LogLevel } from "./http.js";
 import type { NetworkOptions } from "./network.js";
 import type { HyperPlugin } from "./plugins.js";
+import { RetryOptions } from "./retry.js";
 
 // eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export interface HyperttpPluginsExtension {}
@@ -15,6 +16,8 @@ export interface BaseHttpClientOptions {
    * @en Base network configuration (timeouts, headers, keep-alive)
    */
   network?: Partial<NetworkOptions>;
+
+  retry?: Partial<RetryOptions>;
 
   /**
    * @ru Кастомная функция логирования работы клиента
