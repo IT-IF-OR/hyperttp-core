@@ -40,3 +40,12 @@ export interface HyperPlugin<T extends HyperCore = HyperCore> {
   enabled: (config: HttpClientOptions) => boolean;
   apply: (client: HyperCore, config: HttpClientOptions) => T;
 }
+
+export interface PluginMetric {
+  pluginName: string;
+  phase: string;
+  inboundMs: number;
+  outboundMs: number;
+  selfTimeMs: number;
+  totalTimeMs: number;
+}

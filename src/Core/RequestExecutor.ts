@@ -1,6 +1,6 @@
 import { request, Agent } from "undici";
 import type { RetryOptions } from "../types/retry.js";
-import type { LogLevel, Method } from "../types/http.js";
+import type { LogLevel, Method, ResponseType } from "../types/http.js";
 import type { RequestMetrics } from "../types/metrics.js";
 import { HttpClientError, TimeoutError } from "../types/errors.js";
 
@@ -40,7 +40,7 @@ export class RequestExecutor {
    * @en Executes a raw HTTP request.
    * @ru Выполняет "сырой" HTTP-запрос.
    */
-  async execute(
+  public async execute(
     method: string,
     url: string,
     headers: Record<string, string>,
@@ -48,6 +48,7 @@ export class RequestExecutor {
     signal?: AbortSignal,
     metrics?: RequestMetrics,
     interceptors?: DynamicInterceptor | any,
+    meta?: { responseType?: ResponseType },
   ): Promise<LowLevelResponse> {
     return this.executeCore(
       method,
@@ -58,7 +59,12 @@ export class RequestExecutor {
       signal,
       async (res) => res.body,
       interceptors,
+      meta?.responseType === "stream",
     );
+  }
+
+  public get verbose(): boolean {
+    return this.options.verbose ?? false;
   }
 
   /**
@@ -124,6 +130,7 @@ export class RequestExecutor {
     signal: AbortSignal | undefined,
     parser: (res: LowLevelResponse) => Promise<TBody>,
     interceptors?: DynamicInterceptor | any,
+    isStreaming: boolean = false,
   ): Promise<LowLevelResponse> {
     let currentUrl = url;
     let currentMethod = method;
@@ -139,27 +146,15 @@ export class RequestExecutor {
     };
 
     const timeoutController = new AbortController();
-    const timer = setTimeout(
-      () => timeoutController.abort(),
-      this.options.timeout,
-    );
+    const timeoutValue = isStreaming ? 0 : this.options.timeout;
+    const timer =
+      timeoutValue > 0
+        ? setTimeout(() => timeoutController.abort(), timeoutValue)
+        : undefined;
 
-    const abortHandler = () => timeoutController.abort();
-
-    if (signal) {
-      if (signal.aborted) {
-        clearTimeout(timer);
-        throw new HttpClientError(
-          "Request aborted by user",
-          "ABORTED",
-          0,
-          undefined,
-          url,
-          method,
-        );
-      }
-      signal.addEventListener("abort", abortHandler, { once: true });
-    }
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : timeoutController.signal;
 
     try {
       while (true) {
@@ -176,7 +171,7 @@ export class RequestExecutor {
             headers: config.headers,
             body: config.body,
             dispatcher: this.agent,
-            signal: timeoutController.signal,
+            signal: combinedSignal,
           });
 
           const status = res.statusCode;
@@ -197,34 +192,31 @@ export class RequestExecutor {
                 status,
               );
             }
-
             const location = resHeaders.location as string | undefined;
             if (location) {
               await this.drainBody(res.body);
-
               const nextUrl = new URL(location, config.url).toString();
-              const nextMethod = status === 303 ? "GET" : currentMethod;
+
+              let nextMethod = currentMethod;
+              if (
+                status === 303 ||
+                ((status === 301 || status === 302) && currentMethod === "POST")
+              ) {
+                nextMethod = "GET";
+              }
 
               currentUrl = nextUrl;
               currentMethod = nextMethod;
               currentBody = nextMethod === "GET" ? undefined : currentBody;
 
               if (nextMethod === "GET") {
-                if (
-                  currentHeaders["content-type"] ||
-                  currentHeaders["Content-Type"] ||
-                  currentHeaders["content-length"] ||
-                  currentHeaders["Content-Length"]
-                ) {
-                  const nextHeaders = { ...currentHeaders };
-                  delete nextHeaders["content-type"];
-                  delete nextHeaders["Content-Type"];
-                  delete nextHeaders["content-length"];
-                  delete nextHeaders["Content-Length"];
-                  currentHeaders = nextHeaders;
-                }
+                const nextHeaders = { ...currentHeaders };
+                delete nextHeaders["content-type"];
+                delete nextHeaders["Content-Type"];
+                delete nextHeaders["content-length"];
+                delete nextHeaders["Content-Length"];
+                currentHeaders = nextHeaders;
               }
-
               redirects++;
               continue;
             }
@@ -233,15 +225,11 @@ export class RequestExecutor {
           if (this.shouldRetry(status)) {
             if (attempt < this.options.maxRetries) {
               if (metrics) metrics.retries += 1;
-
               await this.drainBody(res.body);
-              const delay = this.calcDelay(attempt);
-              if (delay > 0) await this.sleep(delay);
-
+              await this.sleep(this.calcDelay(attempt));
               attempt++;
               continue;
             }
-
             throw new HttpClientError(
               `HTTP ${status}`,
               "HTTP_ERROR",
@@ -260,7 +248,6 @@ export class RequestExecutor {
           });
 
           const parsed = await parser(transformed as LowLevelResponse);
-
           return {
             status: transformed.status,
             headers: transformed.headers,
@@ -268,7 +255,7 @@ export class RequestExecutor {
             url: transformed.url,
           };
         } catch (err: any) {
-          if (err?.name === "AbortError") {
+          if (err.name === "AbortError") {
             if (signal?.aborted) {
               throw new HttpClientError(
                 "Request aborted by user",
@@ -279,13 +266,26 @@ export class RequestExecutor {
                 method,
               );
             }
-            throw new TimeoutError(url, this.options.timeout);
+            if (timeoutController.signal.aborted) {
+              throw new TimeoutError(url, this.options.timeout);
+            }
+
+            throw new HttpClientError(
+              "Request aborted due to transport closure or internal state reset",
+              "TRANSPORT_CLOSED",
+              0,
+              err,
+              url,
+              method,
+            );
           }
 
           if (
             attempt < this.options.maxRetries &&
             (err?.code === "ECONNREFUSED" ||
               err?.code === "ETIMEDOUT" ||
+              err?.code === "ECONNRESET" ||
+              err?.code === "EPIPE" ||
               err?.code === "UND_ERR_SOCKET")
           ) {
             if (metrics) metrics.retries += 1;
@@ -293,13 +293,11 @@ export class RequestExecutor {
             attempt++;
             continue;
           }
-
           throw err;
         }
       }
     } finally {
-      clearTimeout(timer);
-      if (signal) signal.removeEventListener("abort", abortHandler);
+      if (timer) clearTimeout(timer);
     }
   }
 }

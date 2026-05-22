@@ -1,3 +1,5 @@
+import { PluginMetric } from "./plugins.js";
+
 export interface RequestMetrics {
   /**
    * @ru Время начала запроса (timestamp)
@@ -64,6 +66,8 @@ export interface RequestMetrics {
    * @en Request body hash (for caching)
    */
   bodyHash?: string;
+
+  plugins?: Map<string, PluginMetric>;
 
   stages?: {
     serializationMs?: number;
