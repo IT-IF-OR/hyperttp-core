@@ -49,5 +49,5 @@ export interface BaseHttpClientOptions {
   trackMetrics?: any;
 }
 
-export type HttpClientOptions = BaseHttpClientOptions &
-  HyperttpPluginsExtension;
+export interface HttpClientOptions
+  extends BaseHttpClientOptions, HyperttpPluginsExtension {}
