@@ -1,51 +1,48 @@
-import type { HyperCore } from "../Core/HyperCore.js";
 import type { HttpClientOptions } from "./options.js";
+import type { HttpResponse, InternalRequest } from "./hyper.js";
 
 /**
- * @ru
- * Фазы жизненного цикла запроса (выполняются строго по очереди от начала до отправки).
- * Конвейер запроса: START -> PREPARE -> CONTROL -> FORMAT -> SEND.
- * Конвейер ответа:  SEND -> FORMAT -> CONTROL -> PREPARE -> START.
- * @en
- * Request lifecycle phases (executed strictly in order from start to dispatch).
- * Request pipeline: START -> PREPARE -> CONTROL -> FORMAT -> SEND.
- * Response pipeline: SEND -> FORMAT -> CONTROL -> PREPARE -> START.
+ * Фазы жизненного цикла, определяющие строгий порядок выполнения в "луковичной" (onion) архитектуре.
+ * Запрос движется снаружи внутрь: от мониторинга к сети (START -> PREPARE -> CONTROL -> FORMAT -> NETWORK).
+ * Ответ возвращается в обратном порядке: изнутри наружу (NETWORK -> FORMAT -> CONTROL -> PREPARE -> START).
  */
 export type PluginPhase =
-  | /**
-   * @ru Самое начало. Тут запускаются таймеры метрик и пишутся первые логи.
-   * @en The very beginning. Metrics timers start and initial logs are written here.
-   */
-  "START" /**
-   * @ru Подготовка запроса. Проверка кэша (чтобы вернуть ответ сразу) или добавление токенов авторизации.
-   * @en Request preparation. Checking cache (to return early) or injecting auth tokens.
-   */
-  | "PREPARE" /**
-   * @ru Контроль потока. Управление очередью запросов, лимитами частоты и повторами при ошибках.
-   * @en Flow control. Managing request queues, rate limits, and error retries.
-   */
-  | "CONTROL" /**
-   * @ru Форматирование. Превращение объектов в JSON/FormData перед отправкой и парсинг ответов сервера.
-   * @en Data formatting. Serializing objects to JSON/FormData before sending and parsing server responses.
-   */
-  | "FORMAT" /**
-   * @ru Отправка. Низкоуровневый fetch, работа через прокси или утилиты обхода (Zapret, Xray).
-   * @en Dispatching. Low-level fetch operations, proxy routing, or bypass utilities (Zapret, Xray).
-   */
-  | "NETWORK";
+  | "START" // Метрики, логирование, трассировка (самый внешний слой)
+  | "PREPARE" // Кэширование, дедупликация (могут вернуть ответ сразу, минуя сеть)
+  | "CONTROL" // Rate-limiting, очереди коннектов, менеджмент инфлайт-запросов
+  | "FORMAT" // Сериализация тела запроса, парсинг ответов (JSON, XML, HTML)
+  | "NETWORK"; // Чистый сетевой транспорт ядра (самый глубокий слой)
 
-export interface HyperPlugin<T extends HyperCore = HyperCore> {
+/**
+ * Сигнатура функции диспетчеризации запроса.
+ */
+export type DispatchFn = <T = unknown>(
+  req: InternalRequest,
+) => Promise<HttpResponse<T>>;
+
+/**
+ * Функция-обертка (декоратор) для диспетчера.
+ * Принимает ссылку на следующий слой луковицы (`next`) и контекст клиента.
+ */
+export type WrapDispatch = (
+  next: DispatchFn,
+  ctx: { config: HttpClientOptions; core: any }, // core передаем для доступа к низкоуровневым методам вроде destroy
+) => DispatchFn;
+
+/**
+ * Единый интерфейс для создания плагинов Hyperttp.
+ * Любой внешний пакет (cache, metrics) обязан реализовать этот контракт.
+ */
+export interface HyperPlugin {
+  /** Уникальное имя плагина для логирования и предотвращения дублирования */
   name: string;
-  phase: PluginPhase;
-  enabled: (config: HttpClientOptions) => boolean;
-  apply: (client: HyperCore, config: HttpClientOptions) => T;
-}
 
-export interface PluginMetric {
-  pluginName: string;
-  phase: string;
-  inboundMs: number;
-  outboundMs: number;
-  selfTimeMs: number;
-  totalTimeMs: number;
+  /** Фаза, определяющая место плагина в конвейере выполнения */
+  phase: PluginPhase;
+
+  /** Динамическая проверка: должен ли плагин активироваться на основе переданного конфига */
+  enabled: (config: HttpClientOptions) => boolean;
+
+  /** Функция, которая встраивает плагин в цепочку вызовов */
+  wrapDispatch?: WrapDispatch;
 }

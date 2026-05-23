@@ -9,33 +9,39 @@ import type {
   HyperStats,
   InternalRequest,
 } from "../types/hyper.js";
+
 import { defaultConfig } from "../defaultConfig.js";
-import { deepMerge } from "../utils/merge.js";
 
-const getTimestamp = (): number | bigint => {
-  return typeof process !== "undefined" && process.hrtime?.bigint
-    ? process.hrtime.bigint()
-    : performance.now();
-};
+const mergeHeadersFast = (
+  base: Record<string, string | string[]>,
+  override?: Record<string, string | string[]>,
+): Record<string, string | string[]> => {
+  if (!override) return { ...base };
+  const keys = Object.keys(override);
+  if (keys.length === 0) return { ...base };
 
-const getDurationMs = (
-  start: number | bigint,
-  end: number | bigint,
-): number => {
-  if (typeof start === "bigint" && typeof end === "bigint") {
-    return Number(end - start) / 1_000_000;
-  }
-  return (end as number) - (start as number);
+  return {
+    ...base,
+    ...override,
+  };
 };
 
 export class HyperCore {
   public config: HttpClientOptions;
   private transport: HyperTransport | null = null;
-  private defaultHeaders: Record<string, string>;
   private transportPromise: Promise<HyperTransport> | null = null;
+  private readonly defaultHeaders: Record<string, string | string[]>;
+
   constructor(config: HttpClientOptions, transport?: HyperTransport) {
-    const finalConfig = deepMerge({ ...defaultConfig }, config);
-    this.config = finalConfig;
+    this.config = {
+      ...defaultConfig,
+      ...config,
+      network: {
+        ...defaultConfig.network,
+        ...config.network,
+      },
+    };
+
     if (transport) {
       this.transport = transport;
     }
@@ -43,90 +49,79 @@ export class HyperCore {
     this.defaultHeaders = {
       Accept: "application/json, text/plain, */*",
       "Accept-Encoding": "gzip, deflate, br",
-      "User-Agent": config.network?.userAgent || "Hyperttp/2.0",
+      "User-Agent": this.config.network?.userAgent ?? "Hyperttp/2.0",
+      ...(this.config.network?.headers ?? {}),
     };
   }
 
-  /**
-   * Приватный метод для ленивого создания транспорта при первом запросе
-   */
-  private async ensureTransport(): Promise<HyperTransport> {
-    if (this.transportPromise) return this.transportPromise;
-    if (this.transport) return this.transport;
+  private async createTransport(): Promise<HyperTransport> {
+    if (typeof Bun !== "undefined") {
+      const { BunTransport } = await import("../transports/bun.js");
+      return new BunTransport(this.config);
+    }
+    const { NodeTransport } = await import("../transports/node.js");
+    return new NodeTransport(this.config);
+  }
 
-    this.transportPromise = (async () => {
-      let transport: HyperTransport;
-      if (typeof Bun !== "undefined") {
-        const { BunTransport } = await import("../transports/bun.js");
-        transport = new BunTransport(this.config);
-      } else {
-        const { NodeTransport } = await import("../transports/node.js");
-        transport = new NodeTransport(this.config);
-      }
-
-      this.transport = transport;
-
-      return transport;
-    })();
-
+  private ensureTransport(): Promise<HyperTransport> {
+    if (this.transport) {
+      return Promise.resolve(this.transport);
+    }
+    if (!this.transportPromise) {
+      this.transportPromise = this.createTransport().then((transport) => {
+        this.transport = transport;
+        return transport;
+      });
+    }
     return this.transportPromise;
   }
 
-  public dispatch = async <T = any>(
+  public dispatch = async <T = unknown>(
     req: InternalRequest,
   ): Promise<HttpResponse<T>> => {
-    const urlString = typeof req.url === "string" ? req.url : req.url.getURL();
-
     if (req.signal?.aborted) {
       throw new Error("Request aborted by user");
     }
 
-    const activeTransport = await this.ensureTransport();
+    const transport = this.transport ?? (await this.ensureTransport());
 
-    req.meta = req.meta || {};
-    req.meta.timings = req.meta.timings || {};
-
-    const startNetwork = this.config.trackMetrics ? getTimestamp() : null;
-
-    const rawResponse = await activeTransport.execute({
+    const rawResponse = await transport.execute({
       method: req.method,
-      url: urlString,
+      url: req.url,
       headers: req.headers,
       body: req.body,
       signal: req.signal,
     });
 
-    if (this.config.trackMetrics && startNetwork !== null) {
-      req.meta.timings.networkMs = getDurationMs(startNetwork, getTimestamp());
-    }
-
     return {
       status: rawResponse.status,
       headers: rawResponse.headers,
-      body: req.method === "HEAD" ? (undefined as any) : rawResponse.body,
+      body: rawResponse.body,
       url: rawResponse.url,
     };
   };
 
   public async stream(
     req: RequestInterface | string,
+    signal?: AbortSignal,
   ): Promise<StreamResponse<any>> {
-    const url = typeof req === "string" ? req : req.getURL();
-    const signal =
-      typeof req !== "string"
-        ? (req.getSignal?.() ?? (req as any).signal)
-        : undefined;
-    const headers = {
-      ...this.defaultHeaders,
-      ...(typeof req !== "string" ? req.getHeaders?.() : {}),
-    };
+    let url: string;
+    let reqHeaders: Record<string, string | string[]> | undefined;
 
-    const activeTransport = await this.ensureTransport();
+    if (typeof req === "string") {
+      url = req;
+    } else {
+      url = req.getURL();
+      signal = req.getSignal?.() ?? (req as any).signal;
+      reqHeaders = req.getHeaders?.();
+    }
 
-    const rawResponse = await activeTransport.execute({
+    const transport = this.transport ?? (await this.ensureTransport());
+
+    const rawResponse = await transport.execute({
       method: "GET",
       url,
-      headers,
+      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders),
       signal,
     });
 
@@ -138,61 +133,107 @@ export class HyperCore {
     };
   }
 
-  public get<T = any>(
+  /* ───────────────────────────────────────────────────────────────────────── */
+  /*  ПЛИОМОРФНЫЕ МЕТОДЫ ТЕПЕРЬ ВЫЗЫВАЮТ ОДИН СТАТИЧЕСКИЙ МЕТОД ОДНОРОДНО      */
+  /* ───────────────────────────────────────────────────────────────────────── */
+
+  public get<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<HttpResponse<T>> {
-    if (typeof req === "string") {
-      return this.dispatch<T>({
-        method: "GET",
-        url: req,
-        headers: { ...this.defaultHeaders },
-        isGet: true,
-        signal,
-      });
-    }
-    return this.requestInternal<T>("GET", req, undefined, true, signal);
+    return this.dispatch<T>(
+      this.buildInternalRequest("GET", req, undefined, signal),
+    );
   }
 
-  public post<T = any>(
+  public post<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
     signal?: AbortSignal,
   ): Promise<HttpResponse<T>> {
-    return this.requestInternal<T>("POST", req, body, false, signal);
+    return this.dispatch<T>(
+      this.buildInternalRequest("POST", req, body, signal),
+    );
   }
 
-  public put<T = any>(
+  public put<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
+    signal?: AbortSignal,
   ): Promise<HttpResponse<T>> {
-    return this.requestInternal<T>("PUT", req, body, false);
+    return this.dispatch<T>(
+      this.buildInternalRequest("PUT", req, body, signal),
+    );
   }
 
-  public delete<T = any>(
-    req: RequestInterface | string,
-  ): Promise<HttpResponse<T>> {
-    return this.requestInternal<T>("DELETE", req, undefined, false);
-  }
-
-  public patch<T = any>(
+  public patch<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
+    signal?: AbortSignal,
   ): Promise<HttpResponse<T>> {
-    return this.requestInternal<T>("PATCH", req, body, false);
+    return this.dispatch<T>(
+      this.buildInternalRequest("PATCH", req, body, signal),
+    );
   }
 
-  public options<T = any>(
+  public delete<T = unknown>(
+    req: RequestInterface | string,
+    signal?: AbortSignal,
+  ): Promise<HttpResponse<T>> {
+    return this.dispatch<T>(
+      this.buildInternalRequest("DELETE", req, undefined, signal),
+    );
+  }
+
+  public options<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
+    signal?: AbortSignal,
   ): Promise<HttpResponse<T>> {
-    return this.requestInternal<T>("OPTIONS", req, body, false);
+    return this.dispatch<T>(
+      this.buildInternalRequest("OPTIONS", req, body, signal),
+    );
   }
 
-  public async head(
+  public head(
     req: RequestInterface | string,
+    signal?: AbortSignal,
   ): Promise<HttpResponse<null>> {
-    return this.requestInternal<null>("HEAD", req, undefined, false);
+    return this.dispatch<null>(
+      this.buildInternalRequest("HEAD", req, undefined, signal),
+    );
+  }
+
+  private buildInternalRequest(
+    method: Method,
+    req: RequestInterface | string,
+    body?: RequestBodyData,
+    signal?: AbortSignal,
+  ): InternalRequest {
+    let url: string;
+    let reqHeaders: Record<string, string | string[]> | undefined;
+    let reqSignal: AbortSignal | undefined = signal;
+    let finalBody = body;
+    let meta: any = undefined;
+
+    if (typeof req === "string") {
+      url = req;
+    } else {
+      url = req.getURL();
+      reqHeaders = req.getHeaders?.();
+      reqSignal = req.getSignal?.() ?? signal;
+      if (req.getBodyData) finalBody = req.getBodyData();
+      if (req.getMeta) meta = req.getMeta();
+    }
+
+    return {
+      method,
+      url,
+      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders),
+      body: finalBody,
+      signal: reqSignal,
+      meta,
+    };
   }
 
   public extend(options: Partial<HttpClientOptions>): HyperCore {
@@ -209,28 +250,6 @@ export class HyperCore {
   public create(options: Partial<HttpClientOptions>): HyperCore {
     return this.extend(options);
   }
-
-  private async requestInternal<T>(
-    method: Method,
-    req: RequestInterface | string,
-    body?: RequestBodyData,
-    isGet: boolean = false,
-    signal?: AbortSignal,
-  ): Promise<HttpResponse<T>> {
-    return this.dispatch<T>({
-      method,
-      url: req,
-      headers: {
-        ...this.defaultHeaders,
-        ...(typeof req !== "string" ? req.getHeaders?.() : {}),
-      },
-      body:
-        typeof req !== "string" && req.getBodyData ? req.getBodyData() : body,
-      isGet,
-      signal: typeof req !== "string" ? req.getSignal?.() : signal,
-    });
-  }
-
   public getStats(): HyperStats {
     return {};
   }
@@ -238,14 +257,15 @@ export class HyperCore {
     return [];
   }
 
-  public async destroy() {
-    try {
-      if (this.transport && typeof this.transport.destroy === "function") {
-        await this.transport.destroy();
-      }
-    } catch (error) {
-      if (this.config.verbose) {
-        console.warn("[HyperCore] destroy failed:", error);
+  public async destroy(): Promise<void> {
+    const transport = this.transport;
+    if (transport && typeof transport.destroy === "function") {
+      try {
+        await transport.destroy();
+      } catch (error) {
+        if (this.config.verbose) {
+          console.warn("[HyperCore] destroy failed:", error);
+        }
       }
     }
   }

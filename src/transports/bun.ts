@@ -18,7 +18,7 @@ function fastGetHostname(url: string): string {
 }
 
 export class BunTransport implements HyperTransport {
-  private cookieJar = new Map<string, string>();
+  private cookieJar = new Map<string, Map<string, string>>();
   private config: HttpClientOptions;
 
   private activeRequests = 0;
@@ -84,11 +84,30 @@ export class BunTransport implements HyperTransport {
       }
 
       const responseHeaders = (response.headers as any).toJSON?.() ?? {};
+      const body = response.body;
+
+      if (body) {
+        Object.defineProperty(body, "dump", {
+          value: async function (this: ReadableStream) {
+            if (this.locked) return;
+            try {
+              for await (const chunk of this) {
+                void chunk;
+              }
+            } catch {
+              //
+            }
+          },
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        });
+      }
 
       return {
         status: response.status,
         headers: responseHeaders,
-        body: response.body,
+        body: body,
         url: response.url,
       };
     } finally {
@@ -98,29 +117,23 @@ export class BunTransport implements HyperTransport {
     }
   }
 
-  /**
-   * Ищет куки, подходящие для текущего домена (включая wildcard-домены)
-   */
   private getCookiesForDomain(requestDomain: string): string {
-    let matchedCookies = "";
+    const matchedCookies: string[] = [];
 
-    for (const [storedDomain, cookieStr] of this.cookieJar) {
+    for (const [storedDomain, cookiesMap] of this.cookieJar) {
       if (
         requestDomain === storedDomain ||
         requestDomain.endsWith("." + storedDomain)
       ) {
-        matchedCookies = matchedCookies
-          ? `${matchedCookies}; ${cookieStr}`
-          : cookieStr;
+        for (const [key, val] of cookiesMap) {
+          matchedCookies.push(`${key}=${val}`);
+        }
       }
     }
 
-    return matchedCookies;
+    return matchedCookies.length > 0 ? matchedCookies.join("; ") : "";
   }
 
-  /**
-   * Парсит Set-Cookie с поддержкой директивы Domain=...
-   */
   private updateCookies(requestDomain: string, setCookies: string[]): void {
     for (let i = 0; i < setCookies.length; i++) {
       const cookieStr = setCookies[i];
@@ -147,25 +160,13 @@ export class BunTransport implements HyperTransport {
         }
       }
 
-      let currentCookieString = this.cookieJar.get(targetDomain) || "";
-      const searchPattern = `${key}=`;
-      const startIdx = currentCookieString.indexOf(searchPattern);
-
-      if (startIdx !== -1) {
-        let endIdx = currentCookieString.indexOf(";", startIdx);
-        if (endIdx === -1) endIdx = currentCookieString.length;
-
-        currentCookieString =
-          currentCookieString.slice(0, startIdx) +
-          `${key}=${val}` +
-          currentCookieString.slice(endIdx);
-      } else {
-        currentCookieString = currentCookieString
-          ? `${currentCookieString}; ${key}=${val}`
-          : `${key}=${val}`;
+      let domainMap = this.cookieJar.get(targetDomain);
+      if (!domainMap) {
+        domainMap = new Map<string, string>();
+        this.cookieJar.set(targetDomain, domainMap);
       }
 
-      this.cookieJar.set(targetDomain, currentCookieString);
+      domainMap.set(key, val);
     }
   }
 

@@ -60,6 +60,12 @@ export interface NetworkOptions {
   userAgent?: string;
 
   /**
+   * @ru Базовые заголовки по умолчанию для всех запросов
+   * @en Default base headers sent with every request
+   */
+  headers?: Record<string, string | string[]>;
+
+  /**
    * @ru Функция валидации HTTP статуса
    * @en Function to validate HTTP status code
    * @param status - HTTP status code

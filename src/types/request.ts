@@ -186,6 +186,8 @@ export interface RequestInterface {
    * @returns AbortSignal or undefined
    */
   getSignal?(): AbortSignal | undefined;
+
+  getMeta?(): Record<string, any>;
 }
 
 /**

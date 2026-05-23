@@ -1,4 +1,4 @@
-import { PluginMetric } from "./plugins.js";
+import { HyperPlugin } from "./plugins.js";
 
 export interface RequestMetrics {
   /**
@@ -67,7 +67,7 @@ export interface RequestMetrics {
    */
   bodyHash?: string;
 
-  plugins?: Map<string, PluginMetric>;
+  plugins?: Map<string, HyperPlugin>;
 
   stages?: {
     serializationMs?: number;

@@ -1,20 +1,22 @@
-import type { Method } from "./http.js";
-import type { RequestBodyData, RequestInterface } from "./request.js";
+import type { Method, ResponseType } from "./http.js";
+import type { RequestBodyData } from "./request.js";
 
 export interface InternalRequest {
   method: Method;
-  url: RequestInterface | string;
-  headers: Record<string, string>;
+
+  url: string;
+
+  headers: Record<string, string | string[]>;
+
   body?: RequestBodyData;
+
   signal?: AbortSignal;
-  isGet: boolean;
+
   meta?: {
     timings?: {
-      serializationMs?: number;
       networkMs?: number;
-      parsingMs?: number;
     };
-    [key: string]: any;
+    responseType?: ResponseType;
   };
 }
 

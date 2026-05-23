@@ -43,7 +43,7 @@ export class RequestExecutor {
   public async execute(
     method: string,
     url: string,
-    headers: Record<string, string>,
+    headers: Record<string, string | string[]>,
     body: string | Buffer | undefined,
     signal?: AbortSignal,
     metrics?: RequestMetrics,
@@ -124,7 +124,7 @@ export class RequestExecutor {
   private async executeCore<TBody>(
     method: string,
     url: string,
-    headers: Record<string, string>,
+    headers: Record<string, string | string[]>,
     body: string | Buffer | undefined,
     metrics: RequestMetrics | undefined,
     signal: AbortSignal | undefined,
