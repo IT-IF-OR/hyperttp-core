@@ -11,6 +11,7 @@ import type {
 } from "../types/hyper.js";
 
 import { defaultConfig } from "../defaultConfig.js";
+import { HyperPlugin } from "../types/plugins.js";
 
 const mergeHeadersFast = (
   base: Record<string, string | string[]>,
@@ -100,6 +101,25 @@ export class HyperCore {
       url: rawResponse.url,
     };
   };
+
+  public use(plugin: HyperPlugin): this {
+    if (typeof plugin.enabled === "function" && !plugin.enabled(this.config)) {
+      return this;
+    }
+
+    if (typeof plugin.setup === "function") {
+      plugin.setup(this, this.config);
+    }
+
+    if (typeof plugin.wrapDispatch === "function") {
+      this.dispatch = plugin.wrapDispatch(this.dispatch, {
+        config: this.config,
+        core: this,
+      });
+    }
+
+    return this;
+  }
 
   public async stream(
     req: RequestInterface | string,
