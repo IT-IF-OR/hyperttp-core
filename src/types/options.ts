@@ -3,8 +3,14 @@ import type { NetworkOptions } from "./network.js";
 import type { HyperPlugin } from "./plugins.js";
 import { RetryOptions } from "./retry.js";
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
-export interface HyperttpPluginsExtension {}
+/**
+ * @ru Интерфейс-расширение для модулей экосистемы Hyperttp.
+ * @en Extension interface for Hyperttp ecosystem modules.
+ */
+export interface HyperttpPluginsExtension {
+  /** Internal brand to prevent empty interface lint errors */
+  readonly _hyperttpBrand?: never;
+}
 
 /**
  * @ru Базовые настройки HTTP-клиента, входящие в состав основного ядра.
