@@ -96,21 +96,34 @@ export class HyperCore {
       signal: req.signal,
     });
 
+    const cloneBody = (body: any): any => {
+      if (typeof body !== "object" || body === null) return body;
+
+      try {
+        return structuredClone(body);
+      } catch {
+        try {
+          return JSON.parse(JSON.stringify(body));
+        } catch {
+          return { ...body };
+        }
+      }
+    };
+
     const result: HttpResponse<T> = {
       status: rawResponse.status,
       headers: rawResponse.headers,
       body: rawResponse.body as T,
       url: rawResponse.url,
-      clone: () => ({
-        status: rawResponse.status,
-        headers: { ...rawResponse.headers },
-        body:
-          typeof rawResponse.body === "object" && rawResponse.body !== null
-            ? structuredClone(rawResponse.body)
-            : rawResponse.body,
-        url: rawResponse.url,
-        clone: () => result.clone(),
-      }),
+      clone: function (this: HttpResponse<T>) {
+        return {
+          status: this.status,
+          headers: { ...this.headers },
+          body: cloneBody(this.body),
+          url: this.url,
+          clone: () => result.clone(),
+        };
+      },
     };
 
     return result;
