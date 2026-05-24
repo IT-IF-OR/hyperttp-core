@@ -11,16 +11,13 @@ import type {
 } from "../types/hyper.js";
 
 import { defaultConfig } from "../defaultConfig.js";
-import { HyperPlugin } from "../types/plugins.js";
+import { HyperPlugin, PluginContext } from "../types/plugins.js";
 
 const mergeHeadersFast = (
   base: Record<string, string | string[]>,
   override?: Record<string, string | string[]>,
 ): Record<string, string | string[]> => {
   if (!override) return { ...base };
-  const keys = Object.keys(override);
-  if (keys.length === 0) return { ...base };
-
   return {
     ...base,
     ...override,
@@ -32,6 +29,7 @@ export class HyperCore {
   private transport: HyperTransport | null = null;
   private transportPromise: Promise<HyperTransport> | null = null;
   private readonly defaultHeaders: Record<string, string | string[]>;
+  private readonly pluginCtx: PluginContext;
 
   constructor(config: HttpClientOptions, transport?: HyperTransport) {
     this.config = {
@@ -52,6 +50,11 @@ export class HyperCore {
       "Accept-Encoding": "gzip, deflate, br",
       "User-Agent": this.config.network?.userAgent ?? "Hyperttp/2.0",
       ...(this.config.network?.headers ?? {}),
+    };
+
+    this.pluginCtx = {
+      config: this.config,
+      core: this,
     };
   }
 
@@ -108,14 +111,11 @@ export class HyperCore {
     }
 
     if (typeof plugin.setup === "function") {
-      plugin.setup(this, this.config);
+      plugin.setup(this.pluginCtx);
     }
 
     if (typeof plugin.wrapDispatch === "function") {
-      this.dispatch = plugin.wrapDispatch(this.dispatch, {
-        config: this.config,
-        core: this,
-      });
+      this.dispatch = plugin.wrapDispatch(this.dispatch, this.pluginCtx);
     }
 
     return this;
@@ -152,10 +152,6 @@ export class HyperCore {
       url: rawResponse.url,
     };
   }
-
-  /* ───────────────────────────────────────────────────────────────────────── */
-  /*  ПЛИОМОРФНЫЕ МЕТОДЫ ТЕПЕРЬ ВЫЗЫВАЮТ ОДИН СТАТИЧЕСКИЙ МЕТОД ОДНОРОДНО      */
-  /* ───────────────────────────────────────────────────────────────────────── */
 
   public get<T = unknown>(
     req: RequestInterface | string,
@@ -270,9 +266,11 @@ export class HyperCore {
   public create(options: Partial<HttpClientOptions>): HyperCore {
     return this.extend(options);
   }
+
   public getStats(): HyperStats {
     return {};
   }
+
   public getAllMetrics(): RequestMetrics[] {
     return [];
   }

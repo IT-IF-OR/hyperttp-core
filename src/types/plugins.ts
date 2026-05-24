@@ -1,5 +1,6 @@
 import type { HttpClientOptions } from "./options.js";
 import type { HttpResponse, InternalRequest } from "./hyper.js";
+import { HyperCore } from "../Core/HyperCore.js";
 
 /**
  * Фазы жизненного цикла, определяющие строгий порядок выполнения в "луковичной" (onion) архитектуре.
@@ -14,6 +15,15 @@ export type PluginPhase =
   | "NETWORK"; // Чистый сетевой транспорт ядра (самый глубокий слой)
 
 /**
+ * Единый неизменяемый контекст для плагина.
+ * Передача одного и того же ссылочного объекта экономит аллокации при сборке луковицы.
+ */
+export interface PluginContext {
+  readonly config: HttpClientOptions;
+  readonly core: HyperCore;
+}
+
+/**
  * Сигнатура функции диспетчеризации запроса.
  */
 export type DispatchFn = <T = unknown>(
@@ -24,10 +34,7 @@ export type DispatchFn = <T = unknown>(
  * Функция-обертка (декоратор) для диспетчера.
  * Принимает ссылку на следующий слой луковицы (`next`) и контекст клиента.
  */
-export type WrapDispatch = (
-  next: DispatchFn,
-  ctx: { config: HttpClientOptions; core: any }, // core передаем для доступа к низкоуровневым методам вроде destroy
-) => DispatchFn;
+export type WrapDispatch = (next: DispatchFn, ctx: PluginContext) => DispatchFn;
 
 /**
  * Единый интерфейс для создания плагинов Hyperttp.
@@ -35,23 +42,21 @@ export type WrapDispatch = (
  */
 export interface HyperPlugin {
   /** Уникальное имя плагина для логирования и предотвращения дублирования */
-  name: string;
+  readonly name: string;
 
   /** Фаза, определяющая место плагина в конвейере выполнения */
-  phase: PluginPhase;
+  readonly phase: PluginPhase;
 
   /** Динамическая проверка: должен ли плагин активироваться на основе переданного конфига */
   enabled: (config: HttpClientOptions) => boolean;
 
   /**
-   * Хук инициализации. Вызывается один раз при создании клиента.
-   * Здесь плагин может безопасно расширять методы ядра или вешать подписки.
+   * Хук инициализации. Теперь принимает тот же PluginContext, что и wrapDispatch.
    */
-  setup?: (core: any, config: HttpClientOptions) => void;
+  setup?: (ctx: PluginContext) => void;
 
   /**
    * Чистая функция-обертка для конвейера запросов.
-   * Больше никаких побочных эффектов внутри!
    */
   wrapDispatch?: WrapDispatch;
 }
