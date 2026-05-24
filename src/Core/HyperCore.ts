@@ -88,7 +88,6 @@ export class HyperCore {
     }
 
     const transport = this.transport ?? (await this.ensureTransport());
-
     const rawResponse = await transport.execute({
       method: req.method,
       url: req.url,
@@ -97,12 +96,24 @@ export class HyperCore {
       signal: req.signal,
     });
 
-    return {
+    const result: HttpResponse<T> = {
       status: rawResponse.status,
       headers: rawResponse.headers,
-      body: rawResponse.body,
+      body: rawResponse.body as T,
       url: rawResponse.url,
+      clone: () => ({
+        status: rawResponse.status,
+        headers: { ...rawResponse.headers },
+        body:
+          typeof rawResponse.body === "object" && rawResponse.body !== null
+            ? structuredClone(rawResponse.body)
+            : rawResponse.body,
+        url: rawResponse.url,
+        clone: () => result.clone(),
+      }),
     };
+
+    return result;
   };
 
   public use(plugin: HyperPlugin): this {

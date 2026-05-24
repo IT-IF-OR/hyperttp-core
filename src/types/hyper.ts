@@ -20,11 +20,16 @@ export interface InternalRequest {
   };
 }
 
-export interface HttpResponse<T = any> {
+export interface Cloneable<T> {
+  clone(): T;
+}
+
+export interface HttpResponse<T = any> extends Cloneable<HttpResponse<T>> {
   status: number;
   headers: Record<string, any>;
   url?: string;
   body: T;
+  clone(): HttpResponse<T>;
 }
 
 export interface HyperStats {
