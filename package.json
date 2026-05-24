@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "High-performance, extensible HTTP client for Node.js and Bun",
   "type": "module",
   "main": "./dist/index.js",
@@ -23,11 +23,11 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-core.git"
   },
   "peerDependencies": {
-    "typescript": "^6.0.3"
+    "typescript": "^6",
+    "undici": "^8.3.0"
   },
   "dependencies": {
-    "http-cookie-agent": "^8.0.0",
-    "undici": "^8.3.0"
+    "http-cookie-agent": "^8.0.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

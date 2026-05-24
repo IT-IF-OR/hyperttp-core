@@ -16,6 +16,7 @@ export type ResponseType =
   | "xml"
   | "html"
   | "buffer"
-  | "stream";
+  | "stream"
+  | "blob";
 
 export type SourceType = "json" | "xml" | "html" | "text" | "buffer";
