@@ -1,4 +1,4 @@
-import { pipeline } from "node:stream";
+import { pipeline, Readable, type Transform } from "node:stream";
 import zlib from "node:zlib";
 import { CookieAgent } from "http-cookie-agent/undici";
 import { RequestExecutor } from "../Core/RequestExecutor.js";
@@ -9,6 +9,13 @@ import type {
 } from "../types/transport.js";
 import type { HttpClientOptions } from "../types/options.js";
 import type { RetryOptions } from "../types/retry.js";
+
+type ExtendedReadableStream = Readable & {
+  destroyed?: boolean;
+  readableEnded?: boolean;
+  closed?: boolean;
+  dump?: () => Promise<void>;
+};
 
 export class NodeTransport implements HyperTransport {
   private agent: CookieAgent;
@@ -96,10 +103,9 @@ export class NodeTransport implements HyperTransport {
       contentEncoding,
     );
 
-    // Примешиваем высокопроизводительный метод .dump() прямо в инстанс стрима
-    if (decompressedBody) {
+    if (decompressedBody instanceof Readable) {
       Object.defineProperty(decompressedBody, "dump", {
-        value: function (this: any) {
+        value: function (this: ExtendedReadableStream) {
           return new Promise<void>((resolve, reject) => {
             if (this.destroyed || this.readableEnded || this.closed) {
               return resolve();
@@ -109,7 +115,7 @@ export class NodeTransport implements HyperTransport {
               this.on("data", () => {});
               this.on("end", resolve);
               this.on("error", reject);
-              this.resume(); // Переводим в flowing mode для моментального слива данных
+              this.resume();
             } else {
               resolve();
             }
@@ -117,7 +123,7 @@ export class NodeTransport implements HyperTransport {
         },
         writable: true,
         configurable: true,
-        enumerable: false, // Метод скрыт от сериализации и перебора ключей
+        enumerable: false,
       });
     }
 
@@ -129,19 +135,18 @@ export class NodeTransport implements HyperTransport {
     };
   }
 
-  /**
-   * Защищенная обертка для потоковой декомпрессии.
-   * Гарантирует отсутствие утечек сокетов при ошибках или ручном закрытии стрима.
-   */
-  private wrapDecompress(body: any, contentEncoding: string | undefined): any {
-    if (!body) return body;
+  private wrapDecompress(
+    body: unknown,
+    contentEncoding: string | undefined,
+  ): unknown {
+    if (!(body instanceof Readable)) return body;
 
     const encoding = contentEncoding?.toLowerCase().trim();
     if (!encoding || encoding === "none" || encoding === "identity") {
       return body;
     }
 
-    let decompressor: any = null;
+    let decompressor: Transform | null = null;
 
     if (encoding === "gzip") {
       decompressor = zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
@@ -155,12 +160,6 @@ export class NodeTransport implements HyperTransport {
       return body;
     }
 
-    /**
-     * Используем встроенный метод pipeline вместо .pipe().
-     * Если zlib стрим выбросит ошибку парсинга данных (Z_DATA_ERROR) или пользователь
-     * прервет чтение, pipeline автоматически вызовет .destroy() на исходном сетевом
-     * потоке undici, освобождая сокет и возвращая его в пул CookieAgent.
-     */
     const decompressedStream = pipeline(body, decompressor, (err) => {
       if (err) {
         decompressedStream.emit("error", err);
@@ -174,15 +173,19 @@ export class NodeTransport implements HyperTransport {
     return decompressedStream;
   }
 
-  public async destroy() {
+  public async destroy(): Promise<void> {
     await new Promise((resolve) => setImmediate(resolve));
 
     try {
-      const anyAgent = this.agent as any;
-      if (typeof anyAgent.close === "function") {
-        await anyAgent.close();
-      } else if (typeof anyAgent.destroy === "function") {
-        await anyAgent.destroy();
+      const structuralAgent = this.agent as unknown as {
+        close?: () => Promise<void>;
+        destroy?: () => Promise<void>;
+      };
+
+      if (typeof structuralAgent.close === "function") {
+        await structuralAgent.close();
+      } else if (typeof structuralAgent.destroy === "function") {
+        await structuralAgent.destroy();
       }
     } catch (err) {
       if (this.executor.verbose) {

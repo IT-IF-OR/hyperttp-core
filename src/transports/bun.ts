@@ -1,4 +1,4 @@
-import { HttpClientOptions } from "../types/options.js";
+import type { HttpClientOptions } from "../types/options.js";
 import type {
   HyperTransport,
   TransportRequest,
@@ -41,7 +41,7 @@ export class BunTransport implements HyperTransport {
 
     try {
       const domain = fastGetHostname(req.url);
-      let headers = req.headers;
+      let headers: Record<string, string | string[]> = req.headers;
       let hasCloned = false;
 
       if (
@@ -56,8 +56,9 @@ export class BunTransport implements HyperTransport {
       const savedCookies = this.getCookiesForDomain(domain);
       if (savedCookies) {
         if (!hasCloned) headers = { ...headers };
-        headers["Cookie"] = headers["Cookie"]
-          ? `${headers["Cookie"]}; ${savedCookies}`
+        const currentCookie = headers["Cookie"];
+        headers["Cookie"] = currentCookie
+          ? `${Array.isArray(currentCookie) ? currentCookie.join("; ") : currentCookie}; ${savedCookies}`
           : savedCookies;
       }
 
@@ -69,10 +70,18 @@ export class BunTransport implements HyperTransport {
           : timeoutSignal;
       }
 
+      const fetchHeaders: Record<string, string> = {};
+      for (const key in headers) {
+        const val = headers[key];
+        if (val !== undefined) {
+          fetchHeaders[key] = Array.isArray(val) ? val.join(", ") : val;
+        }
+      }
+
       const response = await fetch(req.url, {
         method: req.method,
-        headers: headers as Record<string, string>,
-        body: req.body as any,
+        headers: fetchHeaders,
+        body: req.body as BodyInit | null,
         signal: signal,
         keepalive: !!netConfig?.keepAliveTimeout,
         redirect: "manual",
@@ -83,19 +92,23 @@ export class BunTransport implements HyperTransport {
         this.updateCookies(domain, setCookies);
       }
 
-      const responseHeaders = (response.headers as any).toJSON?.() ?? {};
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+
       const body = response.body;
 
       if (body) {
         Object.defineProperty(body, "dump", {
-          value: async function (this: ReadableStream) {
+          value: async function (this: ReadableStream<Uint8Array>) {
             if (this.locked) return;
             try {
               for await (const chunk of this) {
                 void chunk;
               }
             } catch {
-              //
+              // ignore
             }
           },
           writable: true,

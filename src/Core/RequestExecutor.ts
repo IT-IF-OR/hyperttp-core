@@ -4,17 +4,42 @@ import type { LogLevel, Method, ResponseType } from "../types/http.js";
 import type { RequestMetrics } from "../types/metrics.js";
 import { HttpClientError, TimeoutError } from "../types/errors.js";
 
-type LowLevelResponse = {
+export type LowLevelResponse = {
   status: number;
   headers: Record<string, string | string[] | undefined>;
-  body: any;
+  body: unknown;
   url: string;
 };
 
-interface DynamicInterceptor {
-  applyRequest(config: any): Promise<any>;
-  applyResponse(response: any): Promise<any>;
+export interface InterceptorRequestConfig {
+  url: string;
+  method: string;
+  headers: Record<string, string | string[]>;
+  body: string | Buffer | undefined;
 }
+
+export interface DynamicInterceptor {
+  applyRequest(
+    config: InterceptorRequestConfig,
+  ): Promise<InterceptorRequestConfig>;
+  applyResponse(response: LowLevelResponse): Promise<LowLevelResponse>;
+}
+
+/**
+ * @private
+ * Статический интерцептор-заглушка. Исключает аллокацию объекта на каждый запрос.
+ */
+const defaultInterceptorManager: DynamicInterceptor = {
+  applyRequest: (config) => Promise.resolve(config),
+  applyResponse: (response) => Promise.resolve(response),
+};
+
+/**
+ * @private
+ * Статический парсер тела ответа. Исключает создание замыканий внутри execute().
+ */
+const defaultBodyParser = (res: LowLevelResponse): Promise<unknown> =>
+  Promise.resolve(res.body);
 
 /**
  * @en Low-level request executor responsible for handling the actual HTTP lifecycle.
@@ -32,7 +57,7 @@ export class RequestExecutor {
       maxRedirects: number;
       retryOptions: RetryOptions;
       verbose?: boolean;
-      logger?: (level: LogLevel, message: string, meta?: any) => void;
+      logger?: (level: LogLevel, message: string, meta?: unknown) => void;
     },
   ) {}
 
@@ -47,7 +72,7 @@ export class RequestExecutor {
     body: string | Buffer | undefined,
     signal?: AbortSignal,
     metrics?: RequestMetrics,
-    interceptors?: DynamicInterceptor | any,
+    interceptors?: DynamicInterceptor,
     meta?: { responseType?: ResponseType },
   ): Promise<LowLevelResponse> {
     return this.executeCore(
@@ -57,7 +82,7 @@ export class RequestExecutor {
       body,
       metrics,
       signal,
-      async (res) => res.body,
+      defaultBodyParser,
       interceptors,
       meta?.responseType === "stream",
     );
@@ -89,20 +114,21 @@ export class RequestExecutor {
    * @en Ensures that the response body stream is properly closed to prevent memory leaks.
    * @ru Гарантирует, что поток тела ответа корректно закрыт.
    */
-  private async drainBody(body: any): Promise<void> {
-    if (!body) return;
+  private async drainBody(body: unknown): Promise<void> {
+    if (!body || typeof body !== "object") return;
 
     try {
-      if (typeof body.dump === "function") {
-        await body.dump();
+      const stream = body as Record<string, unknown>;
+      if (typeof stream.dump === "function") {
+        await (stream.dump as () => Promise<void>)();
         return;
       }
-      if (typeof body.resume === "function") {
-        body.resume();
+      if (typeof stream.resume === "function") {
+        (stream.resume as () => void)();
         return;
       }
-      if (typeof body.destroy === "function") {
-        body.destroy();
+      if (typeof stream.destroy === "function") {
+        (stream.destroy as () => void)();
       }
     } catch {
       /* ignore */
@@ -129,7 +155,7 @@ export class RequestExecutor {
     metrics: RequestMetrics | undefined,
     signal: AbortSignal | undefined,
     parser: (res: LowLevelResponse) => Promise<TBody>,
-    interceptors?: DynamicInterceptor | any,
+    interceptors?: DynamicInterceptor,
     isStreaming: boolean = false,
   ): Promise<LowLevelResponse> {
     let currentUrl = url;
@@ -140,21 +166,20 @@ export class RequestExecutor {
     let redirects = 0;
     let attempt = 0;
 
-    const manager = interceptors ?? {
-      applyRequest: async (c: any) => c,
-      applyResponse: async (r: any) => r,
-    };
+    const manager = interceptors ?? defaultInterceptorManager;
 
-    const timeoutController = new AbortController();
     const timeoutValue = isStreaming ? 0 : this.options.timeout;
-    const timer =
-      timeoutValue > 0
-        ? setTimeout(() => timeoutController.abort(), timeoutValue)
-        : undefined;
+    let timeoutController: AbortController | undefined = undefined;
+    let timer: NodeJS.Timeout | undefined = undefined;
+    let combinedSignal = signal;
 
-    const combinedSignal = signal
-      ? AbortSignal.any([signal, timeoutController.signal])
-      : timeoutController.signal;
+    if (timeoutValue > 0) {
+      timeoutController = new AbortController();
+      timer = setTimeout(() => timeoutController?.abort(), timeoutValue);
+      combinedSignal = signal
+        ? AbortSignal.any([signal, timeoutController.signal])
+        : timeoutController.signal;
+    }
 
     try {
       while (true) {
@@ -247,26 +272,30 @@ export class RequestExecutor {
             url: config.url,
           });
 
-          const parsed = await parser(transformed as LowLevelResponse);
+          const parsed = await parser(transformed);
           return {
             status: transformed.status,
             headers: transformed.headers,
             body: parsed,
             url: transformed.url,
           };
-        } catch (err: any) {
-          if (err.name === "AbortError") {
+        } catch (err: unknown) {
+          const errorTarget = err as Record<string, unknown> | null;
+          const errorName = errorTarget?.name as string | undefined;
+          const errorCode = errorTarget?.code as string | undefined;
+
+          if (errorName === "AbortError") {
             if (signal?.aborted) {
               throw new HttpClientError(
                 "Request aborted by user",
                 "ABORTED",
                 0,
-                err,
+                err instanceof Error ? err : undefined,
                 url,
                 method,
               );
             }
-            if (timeoutController.signal.aborted) {
+            if (timeoutController?.signal.aborted) {
               throw new TimeoutError(url, this.options.timeout);
             }
 
@@ -274,7 +303,7 @@ export class RequestExecutor {
               "Request aborted due to transport closure or internal state reset",
               "TRANSPORT_CLOSED",
               0,
-              err,
+              err instanceof Error ? err : undefined,
               url,
               method,
             );
@@ -282,11 +311,11 @@ export class RequestExecutor {
 
           if (
             attempt < this.options.maxRetries &&
-            (err?.code === "ECONNREFUSED" ||
-              err?.code === "ETIMEDOUT" ||
-              err?.code === "ECONNRESET" ||
-              err?.code === "EPIPE" ||
-              err?.code === "UND_ERR_SOCKET")
+            (errorCode === "ECONNREFUSED" ||
+              errorCode === "ETIMEDOUT" ||
+              errorCode === "ECONNRESET" ||
+              errorCode === "EPIPE" ||
+              errorCode === "UND_ERR_SOCKET")
           ) {
             if (metrics) metrics.retries += 1;
             await this.sleep(this.calcDelay(attempt));
