@@ -13,6 +13,38 @@ import type {
 import { defaultConfig } from "../defaultConfig.js";
 import { HyperPlugin, PluginContext } from "../types/plugins.js";
 
+/**
+ * @private
+ * Вынесено из dispatch для предотвращения аллокаций функций на каждый запрос
+ */
+const cloneBodyFast = (body: any): any => {
+  if (typeof body !== "object" || body === null) return body;
+
+  try {
+    return structuredClone(body);
+  } catch {
+    try {
+      return JSON.parse(JSON.stringify(body));
+    } catch {
+      return { ...body };
+    }
+  }
+};
+
+/**
+ * @private
+ * Статический хэндлер клонирования ответа для исключения создания замыканий
+ */
+function responseCloneHandler<T>(this: HttpResponse<T>): HttpResponse<T> {
+  return {
+    status: this.status,
+    headers: { ...this.headers },
+    body: cloneBodyFast(this.body),
+    url: this.url,
+    clone: responseCloneHandler,
+  };
+}
+
 const mergeHeadersFast = (
   base: Record<string, string | string[]>,
   override?: Record<string, string | string[]>,
@@ -96,37 +128,13 @@ export class HyperCore {
       signal: req.signal,
     });
 
-    const cloneBody = (body: any): any => {
-      if (typeof body !== "object" || body === null) return body;
-
-      try {
-        return structuredClone(body);
-      } catch {
-        try {
-          return JSON.parse(JSON.stringify(body));
-        } catch {
-          return { ...body };
-        }
-      }
-    };
-
-    const result: HttpResponse<T> = {
+    return {
       status: rawResponse.status,
       headers: rawResponse.headers,
       body: rawResponse.body as T,
       url: rawResponse.url,
-      clone: function (this: HttpResponse<T>) {
-        return {
-          status: this.status,
-          headers: { ...this.headers },
-          body: cloneBody(this.body),
-          url: this.url,
-          clone: () => result.clone(),
-        };
-      },
+      clone: responseCloneHandler,
     };
-
-    return result;
   };
 
   public use(plugin: HyperPlugin): this {
@@ -150,14 +158,14 @@ export class HyperCore {
     signal?: AbortSignal,
   ): Promise<StreamResponse<any>> {
     let url: string;
-    let reqHeaders: Record<string, string | string[]> | undefined;
+    let reqHeaders: Record<string, string> | undefined;
 
     if (typeof req === "string") {
       url = req;
     } else {
-      url = req.getURL();
-      signal = req.getSignal?.() ?? (req as any).signal;
-      reqHeaders = req.getHeaders?.();
+      url = req.url;
+      signal = req.signal ?? signal;
+      reqHeaders = req.headers;
     }
 
     const transport = this.transport ?? (await this.ensureTransport());
@@ -251,7 +259,7 @@ export class HyperCore {
     signal?: AbortSignal,
   ): InternalRequest {
     let url: string;
-    let reqHeaders: Record<string, string | string[]> | undefined;
+    let reqHeaders: Record<string, string> | undefined;
     let reqSignal: AbortSignal | undefined = signal;
     let finalBody = body;
     let meta: any = undefined;
@@ -259,17 +267,20 @@ export class HyperCore {
     if (typeof req === "string") {
       url = req;
     } else {
-      url = req.getURL();
-      reqHeaders = req.getHeaders?.();
-      reqSignal = req.getSignal?.() ?? signal;
-      if (req.getBodyData) finalBody = req.getBodyData();
-      if (req.getMeta) meta = req.getMeta();
+      url = req.url;
+      reqHeaders = req.headers;
+      reqSignal = req.signal ?? signal;
+      finalBody = req.body ?? body;
+      meta = req.meta;
     }
 
     return {
       method,
       url,
-      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders),
+      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders) as Record<
+        string,
+        string
+      >,
       body: finalBody,
       signal: reqSignal,
       meta,
