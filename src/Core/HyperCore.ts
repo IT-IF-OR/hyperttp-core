@@ -305,16 +305,14 @@ export class HyperCore {
     return this.extend(options);
   }
 
-  public async destroy(): Promise<void> {
+  public async destroy(graceful = true): Promise<void> {
     const transport = this.transport;
-    if (transport && typeof transport.destroy === "function") {
-      try {
-        await transport.destroy();
-      } catch (error) {
-        if (this.config.verbose) {
-          console.warn("[HyperCore] destroy failed:", error);
-        }
-      }
+    if (!transport) return;
+
+    if (graceful && typeof transport.close === "function") {
+      await transport.close();
+    } else if (typeof transport.destroy === "function") {
+      await transport.destroy();
     }
   }
 }

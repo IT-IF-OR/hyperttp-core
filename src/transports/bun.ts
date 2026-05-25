@@ -20,6 +20,7 @@ function fastGetHostname(url: string): string {
 export class BunTransport implements HyperTransport {
   private cookieJar = new Map<string, Map<string, string>>();
   private config: HttpClientOptions;
+  private cookieCache = new Map<string, string>();
 
   private activeRequests = 0;
   private concurrencyQueue: (() => void)[] = [];
@@ -103,12 +104,17 @@ export class BunTransport implements HyperTransport {
         Object.defineProperty(body, "dump", {
           value: async function (this: ReadableStream<Uint8Array>) {
             if (this.locked) return;
+            const reader = this.getReader();
             try {
-              for await (const chunk of this) {
-                void chunk;
+              while (!(await reader.read()).done) {
+                for await (const chunk of this) {
+                  void chunk;
+                }
               }
             } catch {
               // ignore
+            } finally {
+              await reader.cancel();
             }
           },
           writable: true,
@@ -131,6 +137,10 @@ export class BunTransport implements HyperTransport {
   }
 
   private getCookiesForDomain(requestDomain: string): string {
+    if (this.cookieCache.has(requestDomain)) {
+      return this.cookieCache.get(requestDomain)!;
+    }
+
     const matchedCookies: string[] = [];
 
     for (const [storedDomain, cookiesMap] of this.cookieJar) {
@@ -144,7 +154,10 @@ export class BunTransport implements HyperTransport {
       }
     }
 
-    return matchedCookies.length > 0 ? matchedCookies.join("; ") : "";
+    const result = matchedCookies.length > 0 ? matchedCookies.join("; ") : "";
+    this.cookieCache.set(requestDomain, result);
+
+    return result;
   }
 
   private updateCookies(requestDomain: string, setCookies: string[]): void {
@@ -180,11 +193,17 @@ export class BunTransport implements HyperTransport {
       }
 
       domainMap.set(key, val);
+      this.cookieCache.clear();
     }
   }
 
-  public async destroy(): Promise<void> {
-    this.cookieJar.clear();
+  public async close(): Promise<void> {
     this.concurrencyQueue = [];
+    this.cookieJar.clear();
+    this.cookieCache.clear();
+  }
+
+  public async destroy(): Promise<void> {
+    await this.close();
   }
 }

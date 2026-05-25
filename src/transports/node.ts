@@ -1,4 +1,4 @@
-import { pipeline, Readable, type Transform } from "node:stream";
+import { compose, Readable, type Transform } from "node:stream";
 import zlib from "node:zlib";
 import { CookieAgent } from "http-cookie-agent/undici";
 import { RequestExecutor } from "../Core/RequestExecutor.js";
@@ -20,6 +20,7 @@ type ExtendedReadableStream = Readable & {
 export class NodeTransport implements HyperTransport {
   private agent: CookieAgent;
   private executor: RequestExecutor;
+  private isClosed = false;
 
   constructor(config: HttpClientOptions) {
     const concurrency =
@@ -107,18 +108,23 @@ export class NodeTransport implements HyperTransport {
       Object.defineProperty(decompressedBody, "dump", {
         value: function (this: ExtendedReadableStream) {
           return new Promise<void>((resolve, reject) => {
-            if (this.destroyed || this.readableEnded || this.closed) {
-              return resolve();
-            }
+            const cleanup = () => {
+              this.removeListener("data", onData);
+              this.removeListener("end", resolve);
+              this.removeListener("error", reject);
+            };
+            const onData = () => {};
 
-            if (typeof this.resume === "function") {
-              this.on("data", () => {});
-              this.on("end", resolve);
-              this.on("error", reject);
-              this.resume();
-            } else {
+            this.on("data", onData);
+            this.on("end", () => {
+              cleanup();
               resolve();
-            }
+            });
+            this.on("error", (err) => {
+              cleanup();
+              reject(err);
+            });
+            this.resume();
           });
         },
         writable: true,
@@ -156,41 +162,49 @@ export class NodeTransport implements HyperTransport {
       decompressor = zlib.createBrotliDecompress();
     }
 
-    if (!decompressor) {
-      return body;
-    }
+    if (!decompressor) return body;
 
-    const decompressedStream = pipeline(body, decompressor, (err) => {
-      if (err) {
-        decompressedStream.emit("error", err);
-
-        if (this.executor.verbose) {
-          console.error?.(`[Hyperttp] Decompression failed: ${err.message}`);
-        }
-      }
-    });
-
-    return decompressedStream;
+    return compose(body, decompressor);
   }
 
-  public async destroy(): Promise<void> {
-    await new Promise((resolve) => setImmediate(resolve));
+  public async close(): Promise<void> {
+    if (this.isClosed) return;
+    this.isClosed = true;
 
     try {
       const structuralAgent = this.agent as unknown as {
         close?: () => Promise<void>;
-        destroy?: () => Promise<void>;
       };
-
       if (typeof structuralAgent.close === "function") {
         await structuralAgent.close();
-      } else if (typeof structuralAgent.destroy === "function") {
+      } else {
+        await this.destroy();
+      }
+    } catch (err) {
+      this.logWarning("Transport close error:", err);
+    }
+  }
+
+  public async destroy(): Promise<void> {
+    this.isClosed = true;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    try {
+      const structuralAgent = this.agent as unknown as {
+        destroy?: () => Promise<void>;
+      };
+      if (typeof structuralAgent.destroy === "function") {
         await structuralAgent.destroy();
       }
     } catch (err) {
-      if (this.executor.verbose) {
-        console.warn("Transport destroy error (likely race condition):", err);
-      }
+      this.logWarning("Transport destroy error:", err);
+    }
+  }
+
+  private logWarning(msg: string, err: unknown) {
+    if (this.executor["verbose"]) {
+      // обращение к приватному полю через bracket notation если нужно
+      console.warn(msg, err);
     }
   }
 }

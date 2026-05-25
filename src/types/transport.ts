@@ -18,5 +18,10 @@ export interface TransportResponse {
 
 export interface HyperTransport {
   execute(req: TransportRequest): Promise<TransportResponse>;
+  /** * Graceful shutdown: дожидается завершения текущих запросов.
+   */
+  close?(): Promise<void>;
+  /** * Forceful shutdown: немедленное закрытие соединений.
+   */
   destroy?(): Promise<void>;
 }
