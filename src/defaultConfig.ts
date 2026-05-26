@@ -1,10 +1,9 @@
-import { HttpClientOptions } from "./types/options.js";
+import type { HttpClientOptions } from "@hyperttp/types";
 
 export const defaultConfig: HttpClientOptions = {
   network: {
     timeout: 30000,
     maxConcurrent: 500,
-    allowHttp2: true,
     pipelining: 10,
     keepAliveTimeout: 30000,
     followRedirects: true,

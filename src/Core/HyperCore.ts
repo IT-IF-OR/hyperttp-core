@@ -1,78 +1,149 @@
-import type { Method } from "../types/http.js";
-import type { HttpClientOptions } from "../types/options.js";
-import type { RequestBodyData, RequestInterface } from "../types/request.js";
-import type { StreamResponse } from "../types/stream.js";
-import type { HyperTransport } from "../types/transport.js";
-import type { HttpResponse, InternalRequest } from "../types/hyper.js";
-
+import type {
+  IHyperCore,
+  HyperTransport,
+  HttpClientOptions,
+  PluginContext,
+  HyperPlugin,
+  InternalRequest,
+  HttpResponse,
+  HyperttpError,
+  RequestInterface,
+  StreamResponse,
+  RequestBodyData,
+  Method,
+} from "@hyperttp/types";
 import { defaultConfig } from "../defaultConfig.js";
-import { HyperPlugin, PluginContext } from "../types/plugins.js";
+import {
+  mapResponseFast,
+  mapStreamFast,
+  mergeHeadersFast,
+} from "../utils/response.js";
+import { createRequire } from "node:module";
 
 type TransportArgs = Parameters<HyperTransport["execute"]>[0];
-type TransportResponse = Awaited<ReturnType<HyperTransport["execute"]>>;
 
-/**
- * @private
- * Теперь функция полностью дженериковая. Какой тип пришел — такой и ушел.
- */
-const cloneBodyFast = <T>(body: T): T => {
-  if (typeof body !== "object" || body === null) return body;
-  try {
-    return structuredClone(body);
-  } catch {
-    try {
-      return JSON.parse(JSON.stringify(body)) as T;
-    } catch {
-      return { ...body };
-    }
-  }
+type HookRecord<T> = {
+  name: string;
+  run: T;
 };
 
-function responseCloneHandler<T>(this: HttpResponse<T>): HttpResponse<T> {
-  return {
-    status: this.status,
-    headers: { ...this.headers },
-    body: cloneBodyFast(this.body),
-    url: this.url,
-    clone: responseCloneHandler,
-  };
+export type Runtime = "bun" | "node";
+
+export function getRuntime(): Runtime {
+  if (typeof Bun !== "undefined") return "bun";
+  return "node";
+}
+
+type TransportDef = {
+  name: string;
+  runtime: Runtime[];
+  pkg: string;
+  export: string;
+  priority: number;
+};
+
+export const TRANSPORTS: TransportDef[] = [
+  {
+    name: "Bun",
+    runtime: ["bun"],
+    pkg: "@hyperttp/transport-bun",
+    export: "BunTransport",
+    priority: 100,
+  },
+  {
+    name: "Undici",
+    runtime: ["node"],
+    pkg: "@hyperttp/transport-undici",
+    export: "UndiciTransport",
+    priority: 90,
+  },
+  {
+    name: "Node",
+    runtime: ["node", "bun"],
+    pkg: "../transports/node.js",
+    export: "NodeTransport",
+    priority: 10,
+  },
+];
+
+declare module "@hyperttp/types" {
+  interface HttpClientOptions {
+    /**
+     * @ru Кастомный транспорт, переданный пользователем вручную
+     * @en Manually provided custom transport instance
+     */
+    customTransport?: HyperTransport;
+  }
+}
+
+export async function resolveTransport(config: HttpClientOptions) {
+  const runtime = getRuntime();
+
+  const candidates = TRANSPORTS.filter((t) => t.runtime.includes(runtime)).sort(
+    (a, b) => b.priority - a.priority,
+  );
+
+  const localRequire = createRequire(process.cwd() + "/package.json");
+
+  for (const t of candidates) {
+    config.logger?.("debug", `Loading transport: ${t.name}`);
+
+    try {
+      const path = t.pkg.startsWith(".")
+        ? new URL(t.pkg, import.meta.url).href
+        : localRequire.resolve(t.pkg);
+
+      const mod = await import(path);
+
+      const Transport = mod[t.export] || mod.default;
+
+      if (!Transport) continue;
+
+      config.logger?.("info", `Selected transport: ${t.name}`);
+      return new Transport(config);
+    } catch (e) {
+      config.logger?.("debug", `Skip ${t.name}: ${e}`);
+    }
+  }
+
+  throw new Error(`No transport for runtime: ${runtime}`);
 }
 
 /**
- * Принимает сырой ответ с телом `unknown` и возвращает плоский объект.
+ * @ru Основной оркестратор HTTP-клиента, управляющий жизненным циклом запросов, плагинами и транспортом.
+ * @en Main HTTP client orchestrator managing request lifecycle, plugins, and network transports.
  */
-const mapResponseFast = (rawResponse: TransportResponse) => ({
-  status: rawResponse.status,
-  headers: rawResponse.headers,
-  body: rawResponse.body,
-  url: rawResponse.url ?? "",
-  clone: responseCloneHandler,
-});
-
-const mapStreamFast = (
-  rawResponse: TransportResponse,
-): StreamResponse<unknown> => ({
-  status: rawResponse.status,
-  headers: rawResponse.headers,
-  body: rawResponse.body,
-  url: rawResponse.url ?? "",
-});
-
-const mergeHeadersFast = (
-  base: Record<string, string | string[]>,
-  override?: Record<string, string | string[]>,
-): Record<string, string | string[]> => {
-  if (!override || Object.keys(override).length === 0) return base;
-  return { ...base, ...override };
-};
-
-export class HyperCore {
+export class HyperCore implements IHyperCore {
+  /**
+   * @ru Текущая конфигурация экземпляра клиента.
+   * @en Current client instance configuration.
+   */
   public config: HttpClientOptions;
+
   private transport: HyperTransport | null = null;
   private transportPromise: Promise<HyperTransport> | null = null;
   private readonly defaultHeaders: Record<string, string | string[]>;
   private readonly pluginCtx: PluginContext;
 
+  private readonly requestHooks: HookRecord<
+    Required<HyperPlugin>["onRequest"]
+  >[] = [];
+  private readonly responseHooks: HookRecord<
+    Required<HyperPlugin>["onResponse"]
+  >[] = [];
+  private readonly errorHooks: HookRecord<Required<HyperPlugin>["onError"]>[] =
+    [];
+
+  private hasRequestHooks = false;
+  private hasResponseHooks = false;
+  private hasErrorHooks = false;
+
+  /**
+   * @ru Создает новый экземпляр HyperCore.
+   * @en Creates a new HyperCore instance.
+   * @param config - Client configuration options.
+   * @param transport - Pre-configured transport layer.
+   */
   constructor(config: HttpClientOptions, transport?: HyperTransport) {
     this.config = {
       ...defaultConfig,
@@ -86,6 +157,10 @@ export class HyperCore {
     if (transport) {
       this.transport = transport;
       this.transportPromise = Promise.resolve(transport);
+
+      if ("config" in transport) {
+        transport.config = this.config;
+      }
     }
 
     this.defaultHeaders = {
@@ -101,15 +176,95 @@ export class HyperCore {
     };
   }
 
+  /**
+   * @private
+   * @ru Динамически импортирует и инициализирует транспорт в зависимости от рантайма.
+   * @en Dynamically imports and initializes transport depending on the runtime environment.
+   * @throws Error если не удалось загрузить или инициализировать модуль транспорта.
+   * @returns Network transport instance.
+   */
   private async createTransport(): Promise<HyperTransport> {
-    if (typeof Bun !== "undefined") {
-      const { BunTransport } = await import("../transports/bun.js");
-      return new BunTransport(this.config);
+    if (this.config.customTransport) {
+      this.config.logger?.("debug", "Using user-provided custom transport.");
+      return this.config.customTransport;
     }
-    const { NodeTransport } = await import("../transports/node.js");
-    return new NodeTransport(this.config);
+
+    const isBun = typeof Bun !== "undefined";
+    const isNode = typeof process !== "undefined" && !!process.versions?.node;
+
+    const strategies = [
+      {
+        name: "Bun",
+        runtime: "bun",
+        check: () => isBun,
+        pkg: "@hyperttp/transport-bun",
+        export: "BunTransport",
+      },
+      {
+        name: "Undici",
+        runtime: "node",
+        check: () => isNode,
+        pkg: "@hyperttp/transport-undici",
+        export: "UndiciTransport",
+      },
+      {
+        name: "Node",
+        runtime: "all",
+        check: () => true,
+        pkg: "../transports/node.js",
+        export: "NodeTransport",
+        isLocal: true,
+      },
+    ];
+    const filtered = strategies.filter((s) => {
+      if (s.runtime === "bun") return isBun;
+      if (s.runtime === "node") return isNode;
+      return true;
+    });
+    const localRequire = createRequire(process.cwd() + "/package.json");
+
+    for (const strategy of filtered) {
+      try {
+        this.config.logger?.(
+          "debug",
+          `Attempting to load ${strategy.name} transport...`,
+        );
+
+        const path = strategy.isLocal
+          ? new URL(strategy.pkg, import.meta.url).href
+          : localRequire.resolve(strategy.pkg);
+
+        const module = await import(path);
+
+        const TransportClass =
+          module[strategy.export] ||
+          module.default?.[strategy.export] ||
+          module.default;
+
+        if (!TransportClass) {
+          throw new Error(`Invalid transport export: ${strategy.name}`);
+        }
+
+        this.config.logger?.(
+          "info",
+          `Successfully initialized ${strategy.name} transport.`,
+        );
+
+        return new TransportClass(this.config);
+      } catch (e) {
+        this.config.logger?.("warn", `${strategy.name} transport failed: ${e}`);
+      }
+    }
+
+    throw new Error("No compatible transport implementation available");
   }
 
+  /**
+   * @private
+   * @ru Гарантирует синглтон-инициализацию сетевого транспорта.
+   * @en Ensures singleton initialization of the network transport layer.
+   * @returns Network transport instance promise.
+   */
   private ensureTransport(): Promise<HyperTransport> {
     return (
       this.transportPromise ||
@@ -120,73 +275,144 @@ export class HyperCore {
     );
   }
 
-  public dispatch = <T = unknown>(
+  /**
+   * @ru Главный конвейер (Hot Path) выполнения запроса, последовательно вызывающий хуки плагинов и сетевой транспорт.
+   * @en Main hot path execution pipeline, sequentially running plugin hooks and the network transport.
+   * @template T - Type of the expected response body.
+   * @param req - Prepared internal request configuration.
+   * @returns Formatted HTTP response object.
+   */
+  public async dispatch<T = unknown>(
     req: InternalRequest,
-  ): Promise<HttpResponse<T>> => {
-    if (req.signal?.aborted) {
-      return Promise.reject(new Error("Request aborted by user"));
+  ): Promise<HttpResponse<T>> {
+    try {
+      if (this.hasRequestHooks) {
+        for (let i = 0; i < this.requestHooks.length; i++) {
+          const shortCircuitResponse = await this.requestHooks[i]!.run(
+            req,
+            this.pluginCtx,
+          );
+          if (shortCircuitResponse) {
+            return this.executeResponseHooks<T>(shortCircuitResponse, req);
+          }
+        }
+      }
+
+      const transport = this.transport || (await this.ensureTransport());
+      const rawResponse = await transport.execute(req as TransportArgs);
+      const response = mapResponseFast(rawResponse);
+
+      return this.executeResponseHooks<T>(response, req);
+    } catch (error) {
+      if (this.hasErrorHooks) {
+        const httpError = error as HyperttpError;
+
+        for (let i = 0; i < this.errorHooks.length; i++) {
+          const recoveredResponse = await this.errorHooks[i]!.run(
+            httpError,
+            req,
+            this.pluginCtx,
+          );
+          if (recoveredResponse) {
+            return this.executeResponseHooks<T>(recoveredResponse, req);
+          }
+        }
+      }
+      throw error;
     }
+  }
 
-    if (this.transport) {
-      return this.transport
-        .execute(req as TransportArgs)
-        .then(mapResponseFast) as unknown as Promise<HttpResponse<T>>;
+  /**
+   * @private
+   * @ru Вспомогательный хелпер прогона сквозной фазы Response.
+   * @en Internal helper to run through the cross-cutting Response phase hooks.
+   * @template T - Type of the expected response body.
+   * @param res - Raw HTTP response object.
+   * @param req - Original internal request configuration.
+   * @returns Processed response object.
+   */
+  private async executeResponseHooks<T>(
+    res: HttpResponse<any>,
+    req: InternalRequest,
+  ): Promise<HttpResponse<T>> {
+    if (this.hasResponseHooks) {
+      for (let i = 0; i < this.responseHooks.length; i++) {
+        await this.responseHooks[i]!.run(res, req, this.pluginCtx);
+      }
     }
+    return res as HttpResponse<T>;
+  }
 
-    return this.ensureTransport()
-      .then((transport) => transport.execute(req as TransportArgs))
-      .then(mapResponseFast) as unknown as Promise<HttpResponse<T>>;
-  };
-
+  /**
+   * @ru Регистрирует плагин и встраивает его хуки в конвейер выполнения.
+   * @en Registers a plugin and injects its hooks into the execution pipeline.
+   * @param plugin - Plugin object to register.
+   * @returns Current client instance.
+   */
   public use(plugin: HyperPlugin): this {
-    if (typeof plugin.enabled === "function" && !plugin.enabled(this.config)) {
+    if (!plugin.enabled(this.config)) {
       return this;
     }
-    if (typeof plugin.setup === "function") {
+
+    if (plugin.setup) {
       plugin.setup(this.pluginCtx);
     }
-    if (typeof plugin.wrapDispatch === "function") {
-      this.dispatch = plugin.wrapDispatch(this.dispatch, this.pluginCtx);
+
+    if (plugin.onRequest) {
+      this.requestHooks.push({ name: plugin.name, run: plugin.onRequest });
+      this.hasRequestHooks = true;
     }
+    if (plugin.onResponse) {
+      this.responseHooks.push({ name: plugin.name, run: plugin.onResponse });
+      this.hasResponseHooks = true;
+    }
+    if (plugin.onError) {
+      this.errorHooks.push({ name: plugin.name, run: plugin.onError });
+      this.hasErrorHooks = true;
+    }
+
     return this;
   }
 
-  public stream(
+  /**
+   * @ru Выполняет GET-запрос в режиме потоковой передачи (streaming) без прогона через хуки плагинов.
+   * @en Executes a GET request in streaming mode, bypassing standard plugin hooks.
+   * @param req - Request configurations or targeted URL string.
+   * @param signal - Optional signal to abort the stream transport.
+   * @returns Stream response mapping container.
+   */
+  public async stream(
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<StreamResponse<unknown>> {
-    let url: string;
-    let reqHeaders: Record<string, string> | undefined;
-
-    if (typeof req === "string") {
-      url = req;
-    } else {
-      url = req.url;
-      signal = req.signal ?? signal;
-      reqHeaders = req.headers;
-    }
-
-    const finalHeaders = mergeHeadersFast(
-      this.defaultHeaders,
-      reqHeaders,
-    ) as Record<string, string>;
+    const isStr = typeof req === "string";
+    const url = isStr ? req : req.url;
+    const reqHeaders = isStr ? undefined : req.headers;
+    const finalSignal = isStr ? signal : (req.signal ?? signal);
 
     const transportArgs: TransportArgs = {
       method: "GET",
       url,
-      headers: finalHeaders,
-      signal,
+      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders) as Record<
+        string,
+        string
+      >,
+      signal: finalSignal,
     };
 
-    if (this.transport) {
-      return this.transport.execute(transportArgs).then(mapStreamFast);
-    }
-
-    return this.ensureTransport()
-      .then((transport) => transport.execute(transportArgs))
-      .then(mapStreamFast);
+    const transport = this.transport || (await this.ensureTransport());
+    const rawResponse = await transport.execute(transportArgs);
+    return mapStreamFast(rawResponse);
   }
 
+  /**
+   * @ru Выполняет HTTP GET-запрос.
+   * @en Executes an HTTP GET request.
+   * @template T - Type of the expected response body.
+   * @param req - Request URL or options object.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped HTTP response.
+   */
   public get<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -196,6 +422,15 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HTTP POST-запрос с телом данных.
+   * @en Executes an HTTP POST request with a payload body.
+   * @template T - Type of the expected response body.
+   * @param req - Request URL or options object.
+   * @param body - Request body data.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped HTTP response.
+   */
   public post<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -206,6 +441,15 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HTTP PUT-запрос с телом данных.
+   * @en Executes an HTTP PUT request with a payload body.
+   * @template T - Type of the expected response body.
+   * @param req - Request URL or options object.
+   * @param body - Request body data.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped HTTP response.
+   */
   public put<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -216,6 +460,15 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HTTP PATCH-запрос с телом данных.
+   * @en Executes an HTTP PATCH request with a payload body.
+   * @template T - Type of the expected response body.
+   * @param req - Request URL or options object.
+   * @param body - Request body data.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped HTTP response.
+   */
   public patch<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -226,6 +479,14 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HTTP DELETE-запрос.
+   * @en Executes an HTTP DELETE request.
+   * @template T - Type of the expected response body.
+   * @param req - Request URL or options object.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped HTTP response.
+   */
   public delete<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -235,6 +496,15 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HTTP OPTIONS-запрос.
+   * @en Executes an HTTP OPTIONS request.
+   * @template T - Type of the expected response body.
+   * @param req - Request URL or options object.
+   * @param body - Optional request body data.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped HTTP response.
+   */
   public options<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -245,6 +515,13 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HTTP HEAD-запрос. Тело ответа всегда возвращает null.
+   * @en Executes an HTTP HEAD request. Response body always resolves to null.
+   * @param req - Request URL or options object.
+   * @param signal - Optional cancellation signal.
+   * @returns Wrapped null response.
+   */
   public head(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -254,42 +531,56 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @private
+   * @ru Быстрый сборщик внутреннего нормализованного состояния запроса.
+   * @en Fast compiler of internal normalized request configurations.
+   * @param method - HTTP Verb / Method.
+   * @param req - User input request target or configuration block.
+   * @param body - Request body data.
+   * @param signal - Optional AbortSignal.
+   * @returns Compiled request payload.
+   */
   private buildInternalRequest(
     method: Method,
     req: RequestInterface | string,
     body?: RequestBodyData,
     signal?: AbortSignal,
   ): InternalRequest {
-    let url: string;
-    let reqHeaders: Record<string, string> | undefined;
-    let reqSignal: AbortSignal | undefined = signal;
-    let finalBody = body;
-
-    let meta: InternalRequest["meta"] = undefined;
-
     if (typeof req === "string") {
-      url = req;
-    } else {
-      url = req.url;
-      reqHeaders = req.headers;
-      reqSignal = req.signal ?? signal;
-      finalBody = req.body ?? body;
-      meta = req.meta as InternalRequest["meta"];
+      return {
+        method,
+        url: req,
+        headers: this.defaultHeaders as Record<string, string>,
+        body,
+        signal,
+        meta: undefined,
+      };
     }
+
+    const headers = req.headers
+      ? (mergeHeadersFast(this.defaultHeaders, req.headers) as Record<
+          string,
+          string
+        >)
+      : (this.defaultHeaders as Record<string, string>);
 
     return {
       method,
-      url,
-      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders) as Record<
-        string,
-        string
-      >,
-      body: finalBody,
-      signal: reqSignal,
-      meta,
+      url: req.url,
+      headers,
+      body: req.body ?? body,
+      signal: req.signal ?? signal,
+      meta: req.meta as InternalRequest["meta"],
     };
   }
 
+  /**
+   * @ru Создает новую копию ядра, расширяя текущую конфигурацию новыми опциями.
+   * @en Creates a new core copy extending the current instance configuration with fresh options.
+   * @param options - Partial configuration object override.
+   * @returns Extended HyperCore instance.
+   */
   public extend(options: Partial<HttpClientOptions>): HyperCore {
     return new HyperCore(
       {
@@ -301,11 +592,23 @@ export class HyperCore {
     );
   }
 
+  /**
+   * @ru Алиас метода `extend`. Создает инстанс на базе текущих настроек.
+   * @en Alias for `extend` method. Spawn instance configuration based on current setup.
+   * @param options - Partial configuration object override.
+   * @returns Extended HyperCore instance.
+   */
   public create(options: Partial<HttpClientOptions>): HyperCore {
     return this.extend(options);
   }
 
+  /**
+   * @ru Завершает работу транспорта и корректно освобождает дескрипторы активных соединений.
+   * @en Destroys the transport layer lifecycle and cleans up active sockets accurately.
+   * @param graceful - If true, drains pipeline before connection teardown.
+   */
   public async destroy(graceful = true): Promise<void> {
+    this.config.logger?.("debug", "Destroying transport...");
     const transport = this.transport;
     if (!transport) return;
 

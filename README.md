@@ -1,111 +1,121 @@
-# @hyperttp/core 🚀
+# @hyperttp/core ⚡
 
-> English | Русский
+> English | [Русский](https://github.com/IT-IF-OR/hyperttp-core/tree/main/lang/ru)
 
 ---
 
-## 🌐 Language / Язык
+## 🌐 Language
 
-- 🇺🇸 [English](https://github.com/IT-IF-OR/hyperttp-core)
+- 🇺🇸 English
 - 🇷🇺 [Русский](https://github.com/IT-IF-OR/hyperttp-core/tree/main/lang/ru)
 
 ---
 
-High-performance HTTP core for Node.js and Bun built on top of `undici`.
+**Hyperttp** is a high-performance, isomorphic HTTP client designed for modern Node.js and Bun environments.
+It is built as a thin core with an intelligent transport selection strategy and a powerful plugin system.
 
-`@hyperttp/core` is designed for:
+## Why Hyperttp?
 
-- stable p90/p99 latency,
-- predictable behavior under load,
-- tail-latency reduction,
-- high throughput performance,
-- low overhead transport-layer abstraction.
-
----
-
-## Features
-
-- ⚡ High performance HTTP execution layer
-- 📉 Stable p90/p99 latency under load
-- 🔄 Keep-Alive & connection pooling
-- 🌊 Stream response support
-- 🍪 CookieAgent integration
-- 📈 Request metrics tracking
-- 🔧 Flexible network-layer configuration
-- ♻️ Retry & redirect handling
-- 🧩 Simple API over `undici`
+- **⚡ Performance:** optimized hot-path HTTP request execution for Node.js and Bun
+- **🧩 Isomorphism:** unified API for Node.js and Bun. The system automatically selects the best transport
+  (native Bun, Undici, or standard Node.js `http`)
+- **🔌 Plugin system:** easily extend functionality via hooks
+  (`onRequest`, `onResponse`, `onError`)
+- **🛠️ Transport strategy:** easily add support for new runtimes
+  (Deno, Browser) via the `HyperTransport` interface
 
 ---
 
-## Performance
-
-`@hyperttp/core` provides:
-
-- minimal p99 latency among most HTTP clients,
-- throughput close to `undici`,
-- significantly more stable latency under load.
-
----
-
-## Benchmark
+## Benchmarks
 
 ### Test configuration
 
 ```txt
-Requests      20000
-Concurrency   200
-Warmup        500
-Timeout       60000 ms
-Runtime       Node.js
+Requests        100000
+Concurrency     500
+Warmup          500
+Timeout         60000 ms
 ```
 
-Benchmark executed via:
+Run benchmark:
 
 ```bash
-npx tsx ./bench.ts
+bun run bench.ts && npx tsx bench.ts
 ```
 
 ---
 
 ## [Benchmark results](https://github.com/IT-IF-OR/bench)
 
-| Client         |   RPS |     Avg |      p99 |    Heap |
-| :------------- | ----: | ------: | -------: | ------: |
-| undici         | 9.86K | 20.22ms | 203.05ms |  155 MB |
-| @hyperttp/core | 9.04K | 22.10ms |  29.14ms |  295 MB |
-| hyperttp       | 7.10K | 28.12ms |  40.02ms |  272 MB |
-| fetch          | 5.78K | 34.47ms | 322.17ms |  289 MB |
-| ky             | 4.50K | 44.35ms | 440.24ms |  374 MB |
-| axios          | 4.08K | 48.76ms |  54.92ms |  238 MB |
-| node-fetch     | 3.62K | 55.10ms |  83.60ms |  434 MB |
-| got            | 3.06K | 65.31ms |  96.38ms |  164 MB |
-| superagent     | 2.96K | 67.29ms |  78.96ms | 81.1 MB |
+---
+
+# 🟦 Node.js v24.14.1 — Undici transport
+
+### 🏆 Leaderboard (by RPS)
+
+| Rank | Client         | RPS    | p99      | AVG     | Heap    |
+| ---- | -------------- | ------ | -------- | ------- | ------- |
+| 🥇 1 | @hyperttp/core | 27.72K | 43.45ms  | 17.95ms | 18.7 MB |
+| 🥈 2 | undici         | 19.80K | 59.51ms  | 25.17ms | 20.6 MB |
+| 🥉 3 | ky             | 7.82K  | 119.80ms | 63.86ms | 34.1 MB |
+| 4    | node-fetch     | 6.39K  | 125.38ms | 77.95ms | 15.2 MB |
+| 5    | superagent     | 6.28K  | 127.06ms | 79.50ms | 15.1 MB |
+| 6    | axios          | 6.19K  | 110.82ms | 80.53ms | 21.4 MB |
+| 7    | got            | 5.84K  | 130.92ms | 85.49ms | 15.7 MB |
 
 ---
 
-## Why p99 matters
+# 🟨 Bun v1.3.14 — Bun transport
 
-Most HTTP clients look good on average latency but suffer from high tail latency
-under load.
+### 🏆 Leaderboard (by RPS)
 
-`@hyperttp/core` is optimized for:
-
-- stable scheduling behavior,
-- predictable concurrency,
-- minimized latency spikes,
-- burst workload stability.
+| Rank | Client         | RPS    | p99     | AVG     | Heap    |
+| ---- | -------------- | ------ | ------- | ------- | ------- |
+| 🥇 1 | undici         | 36.42K | 15.67ms | 13.68ms | 31.8 MB |
+| 🥈 2 | node-fetch     | 36.29K | 16.70ms | 13.74ms | 4.07 MB |
+| 🥉 3 | @hyperttp/core | 34.26K | 21.61ms | 14.54ms | 34.9 MB |
+| 4    | ky             | 31.10K | 22.78ms | 16.05ms | 9.88 MB |
+| 5    | superagent     | 13.86K | 69.78ms | 36.00ms | 18.1 MB |
+| 6    | axios          | 8.98K  | 66.58ms | 55.52ms | 18.8 MB |
+| 7    | got            | 7.15K  | 86.70ms | 69.83ms | 25.2 MB |
 
 ---
 
-## Installation
+# 🟩 Node.js v24.14.1 — Node transport
 
-### Bun
+### 🏆 Leaderboard (by RPS)
 
-```bash
-bun add @hyperttp/core
-```
+| Rank | Client         | RPS    | p99      | AVG     | Heap    |
+| ---- | -------------- | ------ | -------- | ------- | ------- |
+| 🥇 1 | undici         | 20.08K | 66.21ms  | 24.76ms | 20.6 MB |
+| 🥈 2 | @hyperttp/core | 12.52K | 66.42ms  | 39.80ms | 14.1 MB |
+| 🥉 3 | ky             | 7.98K  | 113.21ms | 62.55ms | 23.1 MB |
+| 4    | node-fetch     | 6.71K  | 114.06ms | 74.23ms | 15.9 MB |
+| 5    | axios          | 6.29K  | 116.21ms | 79.22ms | 22.2 MB |
+| 6    | superagent     | 6.19K  | 125.31ms | 80.73ms | 15.2 MB |
+| 7    | got            | 5.86K  | 135.85ms | 85.18ms | 19.3 MB |
 
-### npm
+---
+
+# 🟪 Bun v1.3.14 — Node transport
+
+### 🏆 Leaderboard (by RPS)
+
+| Rank | Client         | RPS    | p99      | AVG     | Heap    |
+| ---- | -------------- | ------ | -------- | ------- | ------- |
+| 🥇 1 | node-fetch     | 35.87K | 17.00ms  | 13.90ms | 6.21 MB |
+| 🥈 2 | undici         | 35.79K | 16.59ms  | 13.92ms | 25.4 MB |
+| 🥉 3 | ky             | 29.68K | 37.27ms  | 16.80ms | 17.3 MB |
+| 4    | @hyperttp/core | 17.32K | 50.71ms  | 28.79ms | 17.5 MB |
+| 5    | superagent     | 13.73K | 122.70ms | 36.37ms | 34.4 MB |
+| 6    | axios          | 8.77K  | 86.39ms  | 56.84ms | 18.9 MB |
+| 7    | got            | 6.97K  | 98.33ms  | 71.64ms | 25.3 MB |
+
+---
+
+## Quick start
+
+### Installation
 
 ```bash
 npm install @hyperttp/core
@@ -113,95 +123,53 @@ npm install @hyperttp/core
 
 ---
 
-## Quick start
+### Usage
 
-```ts
+```typescript
 import { HyperCore } from "@hyperttp/core";
 
-const core = new HyperCore({
-  verbose: true,
+const http = new HyperCore({
+  network: { userAgent: "MyApp/1.0" },
 });
 
-const response = await core.get("http://localhost:3000/json");
+// GET request
+const response = await http.get("https://api.example.com/data");
 
-console.log(response.body);
+// POST request
+const result = await http.post("/users", { name: "John" });
 ```
 
 ---
 
-## Configuration
+### Extending and plugins
 
-```ts
-import { HyperCore } from "@hyperttp/core";
+`HyperCore` supports creating isolated instances with custom configuration and plugins.
 
-const core = new HyperCore({
-  verbose: true,
+```typescript
+const apiClient = http.extend({
+  network: { headers: { "X-Auth": "secret" } },
+});
 
-  trackMetrics: true,
-
-  network: {
-    timeout: 30000,
-    maxConcurrent: 500,
-    pipelining: 10,
-    keepAliveTimeout: 30000,
-    allowHttp2: true,
-    followRedirects: true,
-    maxRedirects: 5,
-  },
-
-  retry: {
-    maxRetries: 3,
+apiClient.use({
+  name: "logger-plugin",
+  enabled: () => true,
+  onRequest: async (req) => {
+    console.log(`Sending ${req.method} to ${req.url}`);
   },
 });
 ```
 
 ---
 
-## Stream API
+## Architecture
 
-```ts
-import fs from "node:fs";
+Hyperttp is built on the **Strategy pattern**.
 
-const stream = await core.stream("https://example.com/file.zip");
-
-stream.body.pipe(fs.createWriteStream("./file.zip"));
-```
-
----
-
-## Metrics
-
-```ts
-const core = new HyperCore({
-  trackMetrics: true,
-});
-
-const response = await core.get("https://api.example.com");
-
-console.log(response.meta?.timings);
-```
-
-Example:
-
-```ts
-{
-  networkMs: 12.41;
-}
-```
-
----
-
-## Runtime support
-
-- Node.js 18+
-- Bun
-
----
-
-## Built on
-
-- `undici`
-- `http-cookie-agent`
+1. **Core (`HyperCore`)**: orchestrates the request lifecycle
+2. **Transports (`HyperTransport`)**: low-level implementations for different runtimes
+   dynamically selected to minimize bundle size
+3. **Hooks**: executed during request lifecycle (before request, after response, on error)
+   allowing interception and modification without changing core logic
 
 ---
 

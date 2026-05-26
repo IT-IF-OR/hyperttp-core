@@ -1,210 +1,373 @@
-import { compose, Readable, type Transform } from "node:stream";
-import zlib from "node:zlib";
-import { CookieAgent } from "http-cookie-agent/undici";
-import { RequestExecutor } from "../Core/RequestExecutor.js";
+import http from "node:http";
+import https from "node:https";
+import { Readable } from "node:stream";
 import type {
+  HttpClientOptions,
   HyperTransport,
+  RetryOptions,
   TransportRequest,
   TransportResponse,
-} from "../types/transport.js";
-import type { HttpClientOptions } from "../types/options.js";
-import type { RetryOptions } from "../types/retry.js";
+  TransportResponsePayload,
+} from "@hyperttp/types";
 
-type ExtendedReadableStream = Readable & {
-  destroyed?: boolean;
-  readableEnded?: boolean;
-  closed?: boolean;
-  dump?: () => Promise<void>;
-};
+const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
+const DEFAULT_RETRY_STATUS_CODES = [502, 503, 504];
 
+export function isRedirect(status: number): boolean {
+  return REDIRECT_STATUS_CODES.has(status);
+}
+
+export function combineSignal(
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): {
+  signal?: AbortSignal;
+  cancelTimer: () => void;
+  isTimeoutAbort: () => boolean;
+} {
+  if (timeoutMs <= 0) {
+    return {
+      signal,
+      cancelTimer: () => {},
+      isTimeoutAbort: () => false,
+    };
+  }
+
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+  let combinedSignal: AbortSignal;
+  if (signal) {
+    if (typeof AbortSignal.any === "function") {
+      combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
+    } else {
+      const onAbort = () => timeoutController.abort();
+      signal.addEventListener("abort", onAbort, { once: true });
+      combinedSignal = timeoutController.signal;
+    }
+  } else {
+    combinedSignal = timeoutController.signal;
+  }
+
+  return {
+    signal: combinedSignal,
+    cancelTimer: () => clearTimeout(timer),
+    isTimeoutAbort: () => timeoutController.signal.aborted,
+  };
+}
+
+export function shouldRetry(
+  status: number,
+  retryOptions: RetryOptions,
+): boolean {
+  const codes = retryOptions.retryStatusCodes;
+  if (codes && codes.length > 0) {
+    return codes.includes(status);
+  }
+  return DEFAULT_RETRY_STATUS_CODES.includes(status);
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function calcDelay(attempt: number, retryOptions: RetryOptions): number {
+  const { baseDelay = 1000, maxDelay = 10000, jitter = true } = retryOptions;
+  const base = Math.min(baseDelay * 2 ** attempt, maxDelay);
+  return jitter ? base * (0.75 + Math.random() * 0.5) : base;
+}
+
+/**
+ * @ru Реализация ответа для стандартного Node.js транспорта.
+ */
+class NodeTransportResponse implements TransportResponse {
+  public readonly status: number;
+  public readonly headers: Record<string, string | string[]>;
+  public readonly url: string;
+  public readonly body: TransportResponsePayload;
+  public readonly baseUrl: string;
+
+  private readonly _rawBody: Buffer;
+  private _cachedText?: string;
+  private _cachedJson?: unknown;
+  private _cachedJsonReady = false;
+
+  constructor(
+    status: number,
+    headers: http.IncomingHttpHeaders,
+    url: string,
+    rawBody: Buffer,
+  ) {
+    this.status = status;
+    this.headers = headers as Record<string, string | string[]>;
+    this.url = url;
+    this._rawBody = rawBody;
+    this.baseUrl = url;
+
+    const stream = Readable.from([rawBody]);
+
+    Object.defineProperty(stream, "dump", {
+      value: () => Promise.resolve(),
+      writable: false,
+      enumerable: false,
+      configurable: true,
+    });
+
+    this.body = stream as unknown as TransportResponsePayload;
+  }
+
+  public async text(): Promise<string> {
+    if (this._cachedText === undefined) {
+      this._cachedText = this._rawBody.toString("utf-8");
+    }
+    return this._cachedText;
+  }
+
+  public async json<T>(): Promise<T> {
+    if (this._cachedJsonReady) {
+      return this._cachedJson as T;
+    }
+
+    const text = await this.text();
+    if (!text.trim()) {
+      this._cachedJson = null;
+      this._cachedJsonReady = true;
+      return null as unknown as T;
+    }
+
+    this._cachedJson = JSON.parse(text);
+    this._cachedJsonReady = true;
+    return this._cachedJson as T;
+  }
+}
+
+/**
+ * @ru Высокопроизводительный транспорт на базе классических модулей http/https Node.js.
+ */
 export class NodeTransport implements HyperTransport {
-  private agent: CookieAgent;
-  private executor: RequestExecutor;
-  private isClosed = false;
+  public config: HttpClientOptions;
+  private readonly httpAgent: http.Agent;
+  private readonly httpsAgent: https.Agent;
 
   constructor(config: HttpClientOptions) {
-    const concurrency =
-      config.network?.maxConcurrent === 0
-        ? Infinity
-        : (config.network?.maxConcurrent ?? 500);
+    this.config = config;
 
-    const allowH2 = config.network?.allowHttp2 ?? true;
-
-    const pipelining =
-      config.network?.pipelining !== undefined
-        ? config.network.pipelining === 0
-          ? 256
-          : config.network.pipelining
-        : allowH2
-          ? 100
-          : 1;
-
-    this.agent = new CookieAgent({
-      connections: concurrency === Infinity ? null : concurrency,
-      pipelining,
-      keepAliveTimeout: config.network?.keepAliveTimeout ?? 30000,
-      keepAliveMaxTimeout: config.network?.keepAliveTimeout ?? 30000,
-      clientTtl: 60000,
-      connect: { rejectUnauthorized: config.network?.rejectUnauthorized },
-      allowH2,
-    });
-
-    const retryOptions: RetryOptions = {
-      maxRetries: config.retry?.maxRetries ?? 3,
-      ...config.retry,
+    const agentOptions: http.AgentOptions = {
+      keepAlive: true,
+      keepAliveMsecs: config.network?.keepAliveTimeout ?? 30000,
+      maxSockets: config.network?.maxConcurrent ?? 500,
+      maxFreeSockets: Math.min(
+        256,
+        Math.floor((config.network?.maxConcurrent ?? 500) / 2),
+      ),
+      scheduling: "lifo",
     };
 
-    this.executor = new RequestExecutor(this.agent, {
-      timeout: config.network?.timeout ?? 30000,
-      maxRetries: retryOptions.maxRetries ?? 3,
-      followRedirects: config.network?.followRedirects ?? true,
-      maxRedirects: config.network?.maxRedirects ?? 5,
-      retryOptions: retryOptions,
-      verbose: config.verbose ?? false,
-      logger: config.logger,
-    });
+    this.httpAgent = new http.Agent(agentOptions);
+    this.httpsAgent = new https.Agent(agentOptions);
+  }
+
+  private get timeout(): number {
+    return this.config.network?.timeout ?? 30000;
   }
 
   public async execute(req: TransportRequest): Promise<TransportResponse> {
-    const rawResponse = await this.executor.execute(
-      req.method,
-      req.url,
-      req.headers,
-      req.body,
-      req.signal,
-    );
+    let currentUrl = req.url;
+    let currentMethod = req.method;
+    let currentHeaders = { ...req.headers };
+    let currentBody = req.body;
 
-    const normalizedHeaders: Record<string, string> = {};
-    const rawHeaders = rawResponse.headers;
-    const keys = Object.keys(rawHeaders);
+    let redirects = 0;
+    let attempt = 0;
+    const maxRedirects = this.config.network?.maxRedirects ?? 5;
+    const maxRetries = this.config.retry?.maxRetries ?? 3;
 
-    let contentEncoding: string | undefined = undefined;
+    const isStreamBody = currentBody instanceof Readable;
 
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const value = rawHeaders[key];
-      if (value === undefined) continue;
+    while (true) {
+      const { signal, cancelTimer, isTimeoutAbort } = combineSignal(
+        req.signal,
+        this.timeout,
+      );
 
-      const lowerKey = key.toLowerCase();
+      try {
+        const fullUrl = new URL(currentUrl);
 
-      if (lowerKey === "content-encoding") {
-        contentEncoding = Array.isArray(value) ? value[0] : (value as string);
-      }
+        const result = await this.dispatchOnce(fullUrl, {
+          method: currentMethod,
+          headers: currentHeaders as Record<string, string>,
+          body: currentBody,
+          signal,
+        });
 
-      if (Array.isArray(value)) {
-        normalizedHeaders[key] =
-          lowerKey === "set-cookie" ? value.join("\n") : value.join(", ");
-      } else {
-        normalizedHeaders[key] = value as string;
+        if (
+          (this.config.network?.followRedirects ?? true) &&
+          isRedirect(result.status)
+        ) {
+          if (redirects >= maxRedirects) {
+            throw new Error("Too many redirects");
+          }
+
+          const location = result.headers["location"];
+          if (location && typeof location === "string") {
+            const nextUrl = new URL(location, fullUrl.toString()).toString();
+            let nextMethod = currentMethod;
+
+            if (
+              result.status === 303 ||
+              ((result.status === 301 || result.status === 302) &&
+                currentMethod === "POST")
+            ) {
+              nextMethod = "GET";
+            }
+
+            currentUrl = nextUrl;
+            currentMethod = nextMethod;
+
+            currentBody =
+              nextMethod === "GET" || isStreamBody ? undefined : currentBody;
+
+            const nextHeaders = { ...currentHeaders };
+            if (nextMethod === "GET") {
+              delete nextHeaders["content-type"];
+              delete nextHeaders["content-length"];
+            }
+            currentHeaders = nextHeaders;
+
+            redirects += 1;
+            continue;
+          }
+        }
+
+        if (
+          !isStreamBody &&
+          shouldRetry(result.status, this.config.retry ?? {})
+        ) {
+          if (attempt < maxRetries) {
+            await sleep(calcDelay(attempt, this.config.retry ?? {}));
+            attempt += 1;
+            continue;
+          }
+        }
+
+        return new NodeTransportResponse(
+          result.status,
+          result.headers,
+          fullUrl.toString(),
+          result.body,
+        );
+      } catch (err: any) {
+        if (err.name === "AbortError" || isTimeoutAbort()) {
+          if (req.signal?.aborted) throw err;
+          if (isTimeoutAbort()) {
+            throw new Error(`Request timeout after ${this.timeout}ms`, {
+              cause: err,
+            });
+          }
+          throw new Error("Transport closed or aborted", { cause: err });
+        }
+
+        const retryableCodes = [
+          "ECONNREFUSED",
+          "ETIMEDOUT",
+          "ECONNRESET",
+          "EPIPE",
+        ];
+        if (
+          !isStreamBody &&
+          attempt < maxRetries &&
+          retryableCodes.includes(err.code)
+        ) {
+          await sleep(calcDelay(attempt, this.config.retry ?? {}));
+          attempt += 1;
+          continue;
+        }
+
+        throw err;
+      } finally {
+        cancelTimer();
       }
     }
-
-    const decompressedBody = this.wrapDecompress(
-      rawResponse.body,
-      contentEncoding,
-    );
-
-    if (decompressedBody instanceof Readable) {
-      Object.defineProperty(decompressedBody, "dump", {
-        value: function (this: ExtendedReadableStream) {
-          return new Promise<void>((resolve, reject) => {
-            const cleanup = () => {
-              this.removeListener("data", onData);
-              this.removeListener("end", resolve);
-              this.removeListener("error", reject);
-            };
-            const onData = () => {};
-
-            this.on("data", onData);
-            this.on("end", () => {
-              cleanup();
-              resolve();
-            });
-            this.on("error", (err) => {
-              cleanup();
-              reject(err);
-            });
-            this.resume();
-          });
-        },
-        writable: true,
-        configurable: true,
-        enumerable: false,
-      });
-    }
-
-    return {
-      status: rawResponse.status,
-      headers: normalizedHeaders,
-      body: decompressedBody,
-      url: rawResponse.url,
-    };
   }
 
-  private wrapDecompress(
-    body: unknown,
-    contentEncoding: string | undefined,
-  ): unknown {
-    if (!(body instanceof Readable)) return body;
+  private dispatchOnce(
+    url: URL,
+    options: {
+      method: string;
+      headers: Record<string, string>;
+      body: unknown;
+      signal?: AbortSignal;
+    },
+  ): Promise<{
+    status: number;
+    headers: http.IncomingHttpHeaders;
+    body: Buffer;
+  }> {
+    return new Promise((resolve, reject) => {
+      const isHttps = url.protocol === "https:";
+      const requestFn = isHttps ? https.request : http.request;
+      const agent = isHttps ? this.httpsAgent : this.httpAgent;
 
-    const encoding = contentEncoding?.toLowerCase().trim();
-    if (!encoding || encoding === "none" || encoding === "identity") {
-      return body;
-    }
+      const reqOptions: http.RequestOptions = {
+        method: options.method,
+        headers: options.headers,
+        agent,
+        signal: options.signal,
+      };
 
-    let decompressor: Transform | null = null;
+      if (options.signal?.aborted) {
+        const abortError = new Error("The operation was aborted.");
+        abortError.name = "AbortError";
+        return reject(abortError);
+      }
 
-    if (encoding === "gzip") {
-      decompressor = zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
-    } else if (encoding === "deflate") {
-      decompressor = zlib.createInflate();
-    } else if (encoding === "br") {
-      decompressor = zlib.createBrotliDecompress();
-    }
+      const req = requestFn(url, reqOptions, (res) => {
+        const chunks: Buffer[] = [];
 
-    if (!decompressor) return body;
+        res.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+        });
 
-    return compose(body, decompressor);
+        res.on("end", () => {
+          const body =
+            chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
+          resolve({
+            status: res.statusCode ?? 200,
+            headers: res.headers,
+            body,
+          });
+        });
+
+        res.on("error", (err) => {
+          reject(err);
+        });
+      });
+
+      req.on("error", (err) => {
+        reject(err);
+      });
+
+      if (options.body !== undefined && options.body !== null) {
+        if (Buffer.isBuffer(options.body) || typeof options.body === "string") {
+          req.write(options.body);
+        } else if (options.body instanceof Readable) {
+          options.body.pipe(req);
+          return; // Управление потоком передано pipe
+        } else {
+          req.write(JSON.stringify(options.body));
+        }
+      }
+
+      req.end();
+    });
   }
 
   public async close(): Promise<void> {
-    if (this.isClosed) return;
-    this.isClosed = true;
-
-    try {
-      const structuralAgent = this.agent as unknown as {
-        close?: () => Promise<void>;
-      };
-      if (typeof structuralAgent.close === "function") {
-        await structuralAgent.close();
-      } else {
-        await this.destroy();
-      }
-    } catch (err) {
-      this.logWarning("Transport close error:", err);
-    }
+    this.httpAgent.destroy();
+    this.httpsAgent.destroy();
   }
 
   public async destroy(): Promise<void> {
-    this.isClosed = true;
-    await new Promise((resolve) => setImmediate(resolve));
-
-    try {
-      const structuralAgent = this.agent as unknown as {
-        destroy?: () => Promise<void>;
-      };
-      if (typeof structuralAgent.destroy === "function") {
-        await structuralAgent.destroy();
-      }
-    } catch (err) {
-      this.logWarning("Transport destroy error:", err);
-    }
-  }
-
-  private logWarning(msg: string, err: unknown) {
-    if (this.executor["verbose"]) {
-      // обращение к приватному полю через bracket notation если нужно
-      console.warn(msg, err);
-    }
+    await this.close();
   }
 }

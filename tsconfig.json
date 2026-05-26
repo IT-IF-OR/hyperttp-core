@@ -9,10 +9,15 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
+
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": false,
+    "noEmit": false
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*"]
 }
