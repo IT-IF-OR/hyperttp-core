@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "1.2.5",
+  "version": "1.2.6",
   "description": "High-performance, extensible HTTP client for Node.js and Bun and other",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,8 +31,8 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-core.git"
   },
   "peerDependencies": {
-    "@hyperttp/transport-bun": "^0.1.1",
-    "@hyperttp/transport-undici": "^0.1.0"
+    "@hyperttp/transport-bun": "^0.1.5",
+    "@hyperttp/transport-undici": "^0.1.7"
   },
   "peerDependenciesMeta": {
     "@hyperttp/transport-bun": {

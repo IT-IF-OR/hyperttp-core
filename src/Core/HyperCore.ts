@@ -26,8 +26,19 @@ import {
   executeResponsePipeline,
   insertHookSorted,
 } from "../utils/pipeline.js";
+import {
+  normalizeBody,
+  normalizeHeaders,
+  normalizeMethod,
+} from "../utils/normalize.js";
 
 type TransportArgs = Parameters<HyperTransport["execute"]>[0];
+
+declare module "@hyperttp/types" {
+  interface HyperttpPluginsExtension {
+    baseURL?: string;
+  }
+}
 
 export type Runtime = "bun" | "node";
 
@@ -115,7 +126,10 @@ export class HyperCore implements IHyperCore {
   private readonly pluginCtx: PluginContext;
   private readonly pipelines = createPipelines();
 
-  constructor(config: HttpClientOptions, transport?: HyperTransport) {
+  constructor(
+    config: HttpClientOptions = defaultConfig,
+    transport?: HyperTransport,
+  ) {
     this.config = {
       ...defaultConfig,
       ...config,
@@ -266,12 +280,11 @@ export class HyperCore implements IHyperCore {
     const finalSignal = isStr ? signal : (req.signal ?? signal);
 
     const transportArgs: TransportArgs = {
-      method: "GET",
+      method: normalizeMethod("GET"),
       url,
-      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders) as Record<
-        string,
-        string | string[]
-      >,
+      headers: normalizeHeaders(
+        mergeHeadersFast(this.defaultHeaders, reqHeaders),
+      ),
       signal: finalSignal,
     };
 
@@ -310,13 +323,12 @@ export class HyperCore implements IHyperCore {
     const finalSignal = isStr ? signal : (req.signal ?? signal);
 
     const transportArgs: TransportArgs = {
-      method: "POST",
+      method: normalizeMethod("POST"),
       url,
-      headers: mergeHeadersFast(this.defaultHeaders, reqHeaders) as Record<
-        string,
-        string | string[]
-      >,
-      body: isStr ? body : (req.body ?? body),
+      headers: normalizeHeaders(
+        mergeHeadersFast(this.defaultHeaders, reqHeaders),
+      ),
+      body: normalizeBody("POST", isStr ? body : (req.body ?? body)),
       signal: finalSignal,
     };
 
@@ -379,35 +391,91 @@ export class HyperCore implements IHyperCore {
     body?: RequestBodyData,
     signal?: AbortSignal,
   ): InternalRequest {
-    if (typeof req === "string") {
+    const isStr = typeof req === "string";
+    let rawUrl = isStr ? req : req?.url;
+
+    if (!rawUrl && !isStr && req && "scheme" in req && "host" in req) {
+      const casted = req as any;
+      try {
+        const cleanHost = String(casted.host).replace(/^https?:\/\//i, "");
+        const urlObj = new URL(`${casted.scheme}://${cleanHost}`);
+
+        if (casted.port) urlObj.port = String(casted.port);
+        if (casted.path) urlObj.pathname = casted.path;
+
+        if (casted.query) {
+          for (const [key, value] of Object.entries(casted.query)) {
+            if (value == null) continue;
+            if (Array.isArray(value)) {
+              value.forEach((v) => urlObj.searchParams.append(key, String(v)));
+            } else {
+              urlObj.searchParams.set(key, String(value));
+            }
+          }
+        }
+        rawUrl = urlObj.toString();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      } catch (_e: unknown) {
+        //
+      }
+    }
+
+    if (this.config.baseURL && rawUrl && !/^https?:\/\//i.test(rawUrl)) {
+      rawUrl = new URL(rawUrl, this.config.baseURL).toString();
+    }
+
+    if (!rawUrl) {
+      throw new Error(
+        `[HyperttpCore] Critical execution failure during ${method} method invocation: 'url' resolved to undefined. ` +
+          `Verify incoming arguments or environment configurations.`,
+      );
+    }
+
+    if (isStr) {
       return {
-        method,
-        url: req,
-        headers: { ...this.defaultHeaders } as Record<
-          string,
-          string | string[]
-        >,
+        method: normalizeMethod(method),
+        url: rawUrl,
+        headers: normalizeHeaders(this.defaultHeaders),
         body,
         signal,
         meta: undefined,
       };
     }
 
-    const headers = req.headers
-      ? (mergeHeadersFast(this.defaultHeaders, req.headers) as Record<
+    const castedReq = req as any;
+    const rawHeaders = req.headers ?? castedReq._headers;
+
+    const headers = rawHeaders
+      ? (mergeHeadersFast(this.defaultHeaders, rawHeaders) as Record<
           string,
           string | string[]
         >)
       : ({ ...this.defaultHeaders } as Record<string, string | string[]>);
 
-    return {
-      method,
-      url: req.url,
-      headers,
-      body: req.body ?? body,
-      signal: req.signal ?? signal,
-      meta: req.meta as InternalRequest["meta"],
+    const internalRequest: InternalRequest = {
+      method: normalizeMethod(method),
+      url: rawUrl,
+      headers: normalizeHeaders(headers),
+      body: normalizeBody(
+        method,
+        castedReq.body ?? castedReq._bodyData ?? body,
+      ),
+      signal: req.signal ?? castedReq._signal ?? signal,
+      meta: (req.meta ?? castedReq._meta) as InternalRequest["meta"],
     };
+
+    this.config.logger?.(
+      "debug",
+      `[HyperttpCore] Internal request dispatched: { ` +
+        `method: "${internalRequest.method}", ` +
+        `url: "${internalRequest.url}", ` +
+        `headersCount: ${Object.keys(internalRequest.headers).length}, ` +
+        `bodyType: "${typeof internalRequest.body}", ` +
+        `bodyLength: ${typeof internalRequest.body === "string" ? internalRequest.body.length : 0} ` +
+        `}`,
+    );
+
+    return internalRequest;
   }
 
   public extend(options: Partial<HttpClientOptions>): this {
