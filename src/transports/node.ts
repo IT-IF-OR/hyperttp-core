@@ -1,9 +1,12 @@
 import http from "node:http";
 import https from "node:https";
+import zlib from "node:zlib";
 import { Readable } from "node:stream";
+import { ReadableStream } from "node:stream/web";
 import type {
   HttpClientOptions,
   HyperTransport,
+  HyperttpError,
   RetryOptions,
   TransportRequest,
   TransportResponse,
@@ -12,48 +15,15 @@ import type {
 
 const REDIRECT_STATUS_CODES = new Set([301, 302, 303, 307, 308]);
 const DEFAULT_RETRY_STATUS_CODES = [502, 503, 504];
+const RETRYABLE_NETWORK_CODES = [
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ECONNRESET",
+  "EPIPE",
+] as const;
 
 export function isRedirect(status: number): boolean {
   return REDIRECT_STATUS_CODES.has(status);
-}
-
-export function combineSignal(
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-): {
-  signal?: AbortSignal;
-  cancelTimer: () => void;
-  isTimeoutAbort: () => boolean;
-} {
-  if (timeoutMs <= 0) {
-    return {
-      signal,
-      cancelTimer: () => {},
-      isTimeoutAbort: () => false,
-    };
-  }
-
-  const timeoutController = new AbortController();
-  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
-
-  let combinedSignal: AbortSignal;
-  if (signal) {
-    if (typeof AbortSignal.any === "function") {
-      combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
-    } else {
-      const onAbort = () => timeoutController.abort();
-      signal.addEventListener("abort", onAbort, { once: true });
-      combinedSignal = timeoutController.signal;
-    }
-  } else {
-    combinedSignal = timeoutController.signal;
-  }
-
-  return {
-    signal: combinedSignal,
-    cancelTimer: () => clearTimeout(timer),
-    isTimeoutAbort: () => timeoutController.signal.aborted,
-  };
 }
 
 export function shouldRetry(
@@ -73,57 +43,146 @@ export function sleep(ms: number): Promise<void> {
 
 export function calcDelay(attempt: number, retryOptions: RetryOptions): number {
   const { baseDelay = 1000, maxDelay = 10000, jitter = true } = retryOptions;
-  const base = Math.min(baseDelay * 2 ** attempt, maxDelay);
+  const base = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
   return jitter ? base * (0.75 + Math.random() * 0.5) : base;
 }
 
-/**
- * @ru Реализация ответа для стандартного Node.js транспорта.
- */
 class NodeTransportResponse implements TransportResponse {
   public readonly status: number;
   public readonly headers: Record<string, string | string[]>;
   public readonly url: string;
-  public readonly body: TransportResponsePayload;
   public readonly baseUrl: string;
 
-  private readonly _rawBody: Buffer;
+  private readonly _decodedStream: Readable;
+  private _cachedBuffer?: Buffer;
   private _cachedText?: string;
   private _cachedJson?: unknown;
   private _cachedJsonReady = false;
+  private _cachedWebStream?: TransportResponsePayload;
 
   constructor(
     status: number,
     headers: http.IncomingHttpHeaders,
     url: string,
-    rawBody: Buffer,
+    rawStream: Readable,
   ) {
     this.status = status;
     this.headers = headers as Record<string, string | string[]>;
     this.url = url;
-    this._rawBody = rawBody;
     this.baseUrl = url;
 
-    const stream = Readable.from([rawBody]);
+    let stream = rawStream;
+    const contentEncoding = headers["content-encoding"];
+    if (typeof contentEncoding === "string") {
+      const encoding = contentEncoding.toLowerCase();
+      if (encoding.includes("gzip")) {
+        stream = stream.pipe(zlib.createGunzip());
+      } else if (encoding.includes("deflate")) {
+        stream = stream.pipe(zlib.createInflate());
+      } else if (encoding.includes("br")) {
+        stream = stream.pipe(zlib.createBrotliDecompress());
+      }
+    }
 
-    Object.defineProperty(stream, "dump", {
-      value: () => Promise.resolve(),
-      writable: false,
-      enumerable: false,
-      configurable: true,
+    this._decodedStream = stream;
+  }
+
+  public get body(): TransportResponsePayload {
+    if (!this._cachedWebStream) {
+      let webStream: ReadableStream;
+
+      if (this._cachedBuffer) {
+        const buf = this._cachedBuffer;
+        webStream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength),
+            );
+            controller.close();
+          },
+        });
+      } else {
+        webStream = Readable.toWeb(this._decodedStream);
+      }
+
+      Object.defineProperty(webStream, "dump", {
+        value: () => this.dump(),
+        writable: false,
+        enumerable: false,
+        configurable: true,
+      });
+
+      this._cachedWebStream = webStream as unknown as TransportResponsePayload;
+    }
+    return this._cachedWebStream;
+  }
+
+  private async _getBuffer(): Promise<Buffer> {
+    if (this._cachedBuffer) return this._cachedBuffer;
+
+    if (this._cachedWebStream) {
+      const reader = (
+        this._cachedWebStream as unknown as ReadableStream<Uint8Array>
+      ).getReader();
+      const chunks: Uint8Array[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      let totalLength = 0;
+      for (const chunk of chunks) totalLength += chunk.byteLength;
+      const merged = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      this._cachedBuffer = Buffer.from(
+        merged.buffer,
+        merged.byteOffset,
+        merged.byteLength,
+      );
+      return this._cachedBuffer;
+    }
+
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+
+      const onData = (chunk: Buffer): void => {
+        chunks.push(chunk);
+      };
+      const onEnd = (): void => {
+        cleanup();
+        this._cachedBuffer = Buffer.concat(chunks);
+        resolve(this._cachedBuffer);
+      };
+      const onError = (err: Error): void => {
+        cleanup();
+        reject(err);
+      };
+
+      const cleanup = (): void => {
+        this._decodedStream.removeListener("data", onData);
+        this._decodedStream.removeListener("end", onEnd);
+        this._decodedStream.removeListener("error", onError);
+      };
+
+      this._decodedStream.on("data", onData);
+      this._decodedStream.on("end", onEnd);
+      this._decodedStream.on("error", onError);
     });
-
-    this.body = stream as unknown as TransportResponsePayload;
   }
 
   public async text(): Promise<string> {
     if (this._cachedText === undefined) {
-      this._cachedText = this._rawBody.toString("utf-8");
+      const buf = await this._getBuffer();
+      this._cachedText = buf.toString("utf-8");
     }
     return this._cachedText;
   }
 
-  public async json<T>(): Promise<T> {
+  public async json<T = unknown>(): Promise<T> {
     if (this._cachedJsonReady) {
       return this._cachedJson as T;
     }
@@ -139,11 +198,13 @@ class NodeTransportResponse implements TransportResponse {
     this._cachedJsonReady = true;
     return this._cachedJson as T;
   }
+
+  public async dump(): Promise<void> {
+    if (this._cachedBuffer) return;
+    this._decodedStream.resume();
+  }
 }
 
-/**
- * @ru Высокопроизводительный транспорт на базе классических модулей http/https Node.js.
- */
 export class NodeTransport implements HyperTransport {
   public config: HttpClientOptions;
   private readonly httpAgent: http.Agent;
@@ -171,6 +232,13 @@ export class NodeTransport implements HyperTransport {
     return this.config.network?.timeout ?? 30000;
   }
 
+  private logRetry(reason: string, attempt: number, maxRetries: number): void {
+    this.config.logger?.(
+      "warn",
+      `Retrying request: ${reason}. Attempt ${attempt}/${maxRetries}`,
+    );
+  }
+
   public async execute(req: TransportRequest): Promise<TransportResponse> {
     let currentUrl = req.url;
     let currentMethod = req.method;
@@ -178,18 +246,14 @@ export class NodeTransport implements HyperTransport {
     let currentBody = req.body;
 
     let redirects = 0;
-    let attempt = 0;
+    const startTime = Date.now();
+    let attempt = 1;
     const maxRedirects = this.config.network?.maxRedirects ?? 5;
     const maxRetries = this.config.retry?.maxRetries ?? 3;
 
-    const isStreamBody = currentBody instanceof Readable;
+    const isStreamBody = currentBody instanceof ReadableStream;
 
     while (true) {
-      const { signal, cancelTimer, isTimeoutAbort } = combineSignal(
-        req.signal,
-        this.timeout,
-      );
-
       try {
         const fullUrl = new URL(currentUrl);
 
@@ -197,46 +261,52 @@ export class NodeTransport implements HyperTransport {
           method: currentMethod,
           headers: currentHeaders as Record<string, string>,
           body: currentBody,
-          signal,
+          externalSignal: req.signal,
+          timeoutMs: this.timeout,
         });
 
         if (
           (this.config.network?.followRedirects ?? true) &&
           isRedirect(result.status)
         ) {
+          result.body.resume();
+
           if (redirects >= maxRedirects) {
             throw new Error("Too many redirects");
           }
 
           const location = result.headers["location"];
-          if (location && typeof location === "string") {
-            const nextUrl = new URL(location, fullUrl.toString()).toString();
-            let nextMethod = currentMethod;
+          const locationStr = Array.isArray(location) ? location[0] : location;
 
-            if (
-              result.status === 303 ||
-              ((result.status === 301 || result.status === 302) &&
-                currentMethod === "POST")
-            ) {
-              nextMethod = "GET";
-            }
-
-            currentUrl = nextUrl;
-            currentMethod = nextMethod;
-
-            currentBody =
-              nextMethod === "GET" || isStreamBody ? undefined : currentBody;
-
-            const nextHeaders = { ...currentHeaders };
-            if (nextMethod === "GET") {
-              delete nextHeaders["content-type"];
-              delete nextHeaders["content-length"];
-            }
-            currentHeaders = nextHeaders;
-
-            redirects += 1;
-            continue;
+          if (typeof locationStr !== "string") {
+            throw new Error("Invalid redirect location");
           }
+
+          const nextUrl = new URL(locationStr, fullUrl.toString()).toString();
+          let nextMethod = currentMethod;
+
+          if (
+            result.status === 303 ||
+            ((result.status === 301 || result.status === 302) &&
+              currentMethod === "POST")
+          ) {
+            nextMethod = "GET";
+          }
+
+          currentUrl = nextUrl;
+          currentMethod = nextMethod;
+          currentBody =
+            nextMethod === "GET" || isStreamBody ? undefined : currentBody;
+
+          const nextHeaders = { ...currentHeaders };
+          if (nextMethod === "GET") {
+            delete nextHeaders["content-type"];
+            delete nextHeaders["content-length"];
+          }
+          currentHeaders = nextHeaders;
+
+          redirects += 1;
+          continue;
         }
 
         if (
@@ -244,6 +314,7 @@ export class NodeTransport implements HyperTransport {
           shouldRetry(result.status, this.config.retry ?? {})
         ) {
           if (attempt < maxRetries) {
+            result.body.resume();
             await sleep(calcDelay(attempt, this.config.retry ?? {}));
             attempt += 1;
             continue;
@@ -256,36 +327,60 @@ export class NodeTransport implements HyperTransport {
           fullUrl.toString(),
           result.body,
         );
-      } catch (err: any) {
-        if (err.name === "AbortError" || isTimeoutAbort()) {
-          if (req.signal?.aborted) throw err;
-          if (isTimeoutAbort()) {
-            throw new Error(`Request timeout after ${this.timeout}ms`, {
-              cause: err,
-            });
+      } catch (err: unknown) {
+        const error = err as HyperttpError & {
+          name?: string;
+          code?: string;
+        };
+
+        if (error.name === "AbortError") {
+          if (req.signal?.aborted) {
+            throw error;
           }
-          throw new Error("Transport closed or aborted", { cause: err });
+
+          const msg = `Request timeout after ${this.timeout}ms`;
+          this.config.logger?.("error", msg);
+
+          const timeoutErr = new Error(msg) as HyperttpError;
+          timeoutErr.name = "AbortError";
+          timeoutErr.code = "TIMEOUT";
+          timeoutErr.request = {
+            url: req.url,
+            method: req.method,
+            headers: req.headers,
+          };
+          timeoutErr.meta = {
+            retryCount: attempt - 1,
+            isRetryable: false,
+            duration: Date.now() - startTime,
+          };
+          throw timeoutErr;
         }
 
-        const retryableCodes = [
-          "ECONNREFUSED",
-          "ETIMEDOUT",
-          "ECONNRESET",
-          "EPIPE",
-        ];
         if (
           !isStreamBody &&
           attempt < maxRetries &&
-          retryableCodes.includes(err.code)
+          error.code &&
+          (RETRYABLE_NETWORK_CODES as readonly string[]).includes(error.code)
         ) {
+          this.logRetry(`due to ${error.code}`, attempt, maxRetries);
           await sleep(calcDelay(attempt, this.config.retry ?? {}));
           attempt += 1;
           continue;
         }
 
-        throw err;
-      } finally {
-        cancelTimer();
+        error.code = error.code ?? "NETWORK_ERROR";
+        error.request = {
+          url: req.url,
+          method: req.method,
+          headers: req.headers,
+        };
+        error.meta = {
+          retryCount: attempt - 1,
+          isRetryable: false,
+          duration: Date.now() - startTime,
+        };
+        throw error;
       }
     }
   }
@@ -296,69 +391,99 @@ export class NodeTransport implements HyperTransport {
       method: string;
       headers: Record<string, string>;
       body: unknown;
-      signal?: AbortSignal;
+      externalSignal?: AbortSignal;
+      timeoutMs: number;
     },
   ): Promise<{
     status: number;
     headers: http.IncomingHttpHeaders;
-    body: Buffer;
+    body: http.IncomingMessage;
   }> {
     return new Promise((resolve, reject) => {
       const isHttps = url.protocol === "https:";
       const requestFn = isHttps ? https.request : http.request;
       const agent = isHttps ? this.httpsAgent : this.httpAgent;
 
+      let isDone = false;
+      let timer: NodeJS.Timeout | undefined;
+
       const reqOptions: http.RequestOptions = {
         method: options.method,
         headers: options.headers,
         agent,
-        signal: options.signal,
       };
 
-      if (options.signal?.aborted) {
+      if (options.externalSignal?.aborted) {
         const abortError = new Error("The operation was aborted.");
         abortError.name = "AbortError";
         return reject(abortError);
       }
 
       const req = requestFn(url, reqOptions, (res) => {
-        const chunks: Buffer[] = [];
+        if (timer) clearTimeout(timer);
+        cleanupExternalSignal();
+        isDone = true;
 
-        res.on("data", (chunk: Buffer) => {
-          chunks.push(chunk);
-        });
-
-        res.on("end", () => {
-          const body =
-            chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
-          resolve({
-            status: res.statusCode ?? 200,
-            headers: res.headers,
-            body,
-          });
-        });
-
-        res.on("error", (err) => {
-          reject(err);
+        resolve({
+          status: res.statusCode ?? 200,
+          headers: res.headers,
+          body: res,
         });
       });
 
-      req.on("error", (err) => {
+      if (options.timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (isDone) return;
+          isDone = true;
+          cleanupExternalSignal();
+          req.destroy();
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        }, options.timeoutMs);
+      }
+
+      let onExternalAbort: (() => void) | undefined;
+      if (options.externalSignal) {
+        onExternalAbort = () => {
+          if (isDone) return;
+          isDone = true;
+          if (timer) clearTimeout(timer);
+          req.destroy();
+          const err = new Error("The operation was aborted.");
+          err.name = "AbortError";
+          reject(err);
+        };
+        options.externalSignal.addEventListener("abort", onExternalAbort, {
+          once: true,
+        });
+      }
+
+      function cleanupExternalSignal(): void {
+        if (options.externalSignal && onExternalAbort) {
+          options.externalSignal.removeEventListener("abort", onExternalAbort);
+        }
+      }
+
+      req.on("error", (err: Error) => {
+        if (isDone) return;
+        isDone = true;
+        if (timer) clearTimeout(timer);
+        cleanupExternalSignal();
         reject(err);
       });
 
       if (options.body !== undefined && options.body !== null) {
         if (Buffer.isBuffer(options.body) || typeof options.body === "string") {
-          req.write(options.body);
-        } else if (options.body instanceof Readable) {
-          options.body.pipe(req);
-          return; // Управление потоком передано pipe
+          req.end(options.body);
+        } else if (options.body instanceof ReadableStream) {
+          Readable.fromWeb(options.body).pipe(req);
         } else {
-          req.write(JSON.stringify(options.body));
+          req.end(JSON.stringify(options.body));
         }
+      } else {
+        req.end();
       }
-
-      req.end();
     });
   }
 

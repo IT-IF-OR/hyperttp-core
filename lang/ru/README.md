@@ -48,7 +48,7 @@ bun run bench.ts && npx tsx bench.ts
 
 ---
 
-# 🟦 Node.js v24.14.1 — Undici transport
+## 🟦 Node.js v24.14.1 — Undici transport
 
 ### 🏆 Leaderboard (by RPS)
 
@@ -64,7 +64,7 @@ bun run bench.ts && npx tsx bench.ts
 
 ---
 
-# 🟨 Bun v1.3.14 — Bun transport
+## 🟨 Bun v1.3.14 — Bun transport
 
 ### 🏆 Leaderboard (by RPS)
 
@@ -80,7 +80,7 @@ bun run bench.ts && npx tsx bench.ts
 
 ---
 
-# 🟩 Node.js v24.14.1 — Node transport
+## 🟩 Node.js v24.14.1 — Node transport
 
 ### 🏆 Leaderboard (by RPS)
 
@@ -96,7 +96,7 @@ bun run bench.ts && npx tsx bench.ts
 
 ---
 
-# 🟪 Bun v1.3.14 — Node transport
+## 🟪 Bun v1.3.14 — Node transport
 
 ### 🏆 Leaderboard (by RPS)
 
