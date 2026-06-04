@@ -65,9 +65,6 @@ export const mapResponseFast = (rawResponse: TransportResponse) => ({
   body: rawResponse.body,
   url: rawResponse.url ?? "",
   clone: responseCloneHandler,
-  json: rawResponse.json,
-  text: rawResponse.text,
-  dump: rawResponse.dump,
   data: null,
 });
 

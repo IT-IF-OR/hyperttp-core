@@ -11,7 +11,8 @@ export type NormalizedBody =
   | null
   | undefined;
 
-const SINGLE_VALUE_HEADERS = new Set([
+const SINGLE_VALUE_HEADERS: Record<string, boolean> = Object.create(null);
+const svh = [
   "content-type",
   "content-length",
   "content-encoding",
@@ -25,101 +26,185 @@ const SINGLE_VALUE_HEADERS = new Set([
   "location",
   "etag",
   "last-modified",
-]);
+];
+for (let i = 0; i < svh.length; i++) {
+  SINGLE_VALUE_HEADERS[svh[i]!] = true;
+}
 
-const MULTI_VALUE_HEADERS = new Set([
-  "set-cookie",
-  "accept",
-  "accept-encoding",
-  "accept-language",
-  "cache-control",
-  "pragma",
-  "vary",
-  "warning",
-  "www-authenticate",
-  "proxy-authenticate",
-]);
+const METHOD_CACHE: Record<string, Method> = {
+  get: "GET",
+  GET: "GET",
+  post: "POST",
+  POST: "POST",
+  put: "PUT",
+  PUT: "PUT",
+  delete: "DELETE",
+  DELETE: "DELETE",
+  patch: "PATCH",
+  PATCH: "PATCH",
+  head: "HEAD",
+  HEAD: "HEAD",
+  options: "OPTIONS",
+  OPTIONS: "OPTIONS",
+};
 
-export function normalizeHeaders(headers: unknown): Record<string, string> {
-  const out: Record<string, string> = Object.create(null);
+export function normalizeMethod(method: string): Method {
+  const cached = METHOD_CACHE[method];
+  if (cached !== undefined) return cached;
+  return method.toUpperCase() as Method;
+}
 
-  if (!headers) return out;
+export function normalizeUrl(req: any): string {
+  if (typeof req === "string") return req;
 
-  const appendHeader = (key: string, rawValue: unknown): void => {
-    const lower = key.toLowerCase();
+  if (req.url) return typeof req.url === "string" ? req.url : String(req.url);
+  if (req._url)
+    return typeof req._url === "string" ? req._url : String(req._url);
 
-    if (!lower) return;
-    if (rawValue === undefined || rawValue === null) return;
+  if (req.scheme && req.host && req.path) {
+    return `${req.scheme}://${req.host}${req.path}`;
+  }
 
-    const value = typeof rawValue === "string" ? rawValue : String(rawValue);
+  throw new Error("URL missing in request");
+}
 
-    if (SINGLE_VALUE_HEADERS.has(lower)) {
-      out[lower] = value;
-      return;
-    }
+export function normalizeHeaders(
+  headers: unknown,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = Object.create(null);
 
-    const existing = out[lower];
-
-    if (existing === undefined) {
-      out[lower] = value;
-      return;
-    }
-
-    if (lower === "cookie" || lower === "cookie2") {
-      out[lower] = `${existing}; ${value}`;
-      return;
-    }
-
-    if (lower === "set-cookie") {
-      out[lower] = `${existing}\n${value}`;
-      return;
-    }
-
-    if (MULTI_VALUE_HEADERS.has(lower)) {
-      out[lower] = `${existing}, ${value}`;
-      return;
-    }
-
-    out[lower] = value;
-  };
+  if (!headers || typeof headers !== "object") return out;
 
   if (Array.isArray(headers)) {
     for (let i = 0; i < headers.length; i += 2) {
       const key = headers[i];
-      const value = headers[i + 1];
       if (typeof key !== "string" || !key) continue;
-      appendHeader(key, value);
+      const rawValue = headers[i + 1];
+      if (rawValue === undefined || rawValue === null) continue;
+
+      const lower = key.toLowerCase();
+      const value = typeof rawValue === "string" ? rawValue : String(rawValue);
+
+      if (SINGLE_VALUE_HEADERS[lower] !== undefined) {
+        out[lower] = value;
+        continue;
+      }
+
+      const existing = out[lower];
+      if (existing === undefined) {
+        out[lower] = value;
+        continue;
+      }
+
+      if (lower === "set-cookie") {
+        if (Array.isArray(existing)) {
+          existing.push(value);
+        } else {
+          out[lower] = [existing, value];
+        }
+        continue;
+      }
+
+      if (lower === "cookie" || lower === "cookie2") {
+        out[lower] = `${existing}; ${value}`;
+        continue;
+      }
+
+      out[lower] = Array.isArray(existing)
+        ? `${existing.join(", ")}, ${value}`
+        : `${existing}, ${value}`;
     }
     return out;
   }
 
-  const headerObj = headers as Record<string, string | string[] | undefined>;
+  const headerObj = headers as Record<string, unknown>;
+  for (const key in headerObj) {
+    if (Object.prototype.hasOwnProperty.call(headerObj, key)) {
+      const val = headerObj[key];
+      if (val === undefined || val === null) continue;
 
-  for (const [key, val] of Object.entries(headerObj)) {
-    if (val === undefined) continue;
-    if (Array.isArray(val)) {
-      for (const item of val) appendHeader(key, item);
-    } else {
-      appendHeader(key, val);
+      const lower = key.toLowerCase();
+
+      if (Array.isArray(val)) {
+        for (let i = 0; i < val.length; i++) {
+          const rawValue = val[i];
+          if (rawValue === undefined || rawValue === null) continue;
+          const value =
+            typeof rawValue === "string" ? rawValue : String(rawValue);
+
+          if (SINGLE_VALUE_HEADERS[lower] !== undefined) {
+            out[lower] = value;
+            continue;
+          }
+
+          const existing = out[lower];
+          if (existing === undefined) {
+            out[lower] = value;
+            continue;
+          }
+
+          if (lower === "set-cookie") {
+            if (Array.isArray(existing)) {
+              existing.push(value);
+            } else {
+              out[lower] = [existing, value];
+            }
+            continue;
+          }
+
+          if (lower === "cookie" || lower === "cookie2") {
+            out[lower] = `${existing}; ${value}`;
+            continue;
+          }
+
+          out[lower] = Array.isArray(existing)
+            ? `${existing.join(", ")}, ${value}`
+            : `${existing}, ${value}`;
+        }
+      } else {
+        const value = typeof val === "string" ? val : String(val);
+
+        if (SINGLE_VALUE_HEADERS[lower] !== undefined) {
+          out[lower] = value;
+          continue;
+        }
+
+        const existing = out[lower];
+        if (existing === undefined) {
+          out[lower] = value;
+          continue;
+        }
+
+        if (lower === "set-cookie") {
+          if (Array.isArray(existing)) {
+            existing.push(value);
+          } else {
+            out[lower] = [existing, value];
+          }
+          continue;
+        }
+
+        if (lower === "cookie" || lower === "cookie2") {
+          out[lower] = `${existing}; ${value}`;
+          continue;
+        }
+
+        out[lower] = Array.isArray(existing)
+          ? `${existing.join(", ")}, ${value}`
+          : `${existing}, ${value}`;
+      }
     }
   }
 
   return out;
 }
 
-export function normalizeMethod(method: string): Method {
-  return method.toUpperCase() as Method;
-}
-
 export function normalizeBody(
   method: Method,
   body: RequestBodyData | undefined,
 ): RequestBodyData | undefined {
-  const upper = method.toUpperCase() as Method;
-
-  if (upper === "GET" || upper === "HEAD") {
+  if (method === "GET" || method === "HEAD") {
     return undefined;
   }
-
   return body ?? undefined;
 }

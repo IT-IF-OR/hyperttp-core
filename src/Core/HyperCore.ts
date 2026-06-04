@@ -18,110 +18,30 @@ import {
   mapStreamFast,
   mergeHeadersFast,
 } from "../utils/response.js";
-import { createRequire } from "node:module";
+import { TransportManager } from "../transports/manager.js";
 import {
   createPipelines,
   executeErrorPipeline,
   executeRequestPipeline,
   executeResponsePipeline,
+  executeResponseDataPipeline,
   insertHookSorted,
 } from "../utils/pipeline.js";
 import {
   normalizeBody,
   normalizeHeaders,
-  normalizeMethod,
+  normalizeUrl,
 } from "../utils/normalize.js";
+import {
+  decompressBuffer,
+  createDecompressStream,
+} from "../utils/decompress.js";
 
 type TransportArgs = Parameters<HyperTransport["execute"]>[0];
 
-declare module "@hyperttp/types" {
-  interface HyperttpPluginsExtension {
-    baseURL?: string;
-  }
-}
-
-export type Runtime = "bun" | "node";
-
-export function getRuntime(): Runtime {
-  if (typeof Bun !== "undefined") return "bun";
-  return "node";
-}
-
-type TransportDef = {
-  name: string;
-  runtime: Runtime[];
-  pkg: string;
-  export: string;
-  priority: number;
-};
-
-export const TRANSPORTS: TransportDef[] = [
-  {
-    name: "Bun",
-    runtime: ["bun"],
-    pkg: "@hyperttp/transport-bun",
-    export: "BunTransport",
-    priority: 100,
-  },
-  {
-    name: "Undici",
-    runtime: ["node"],
-    pkg: "@hyperttp/transport-undici",
-    export: "UndiciTransport",
-    priority: 90,
-  },
-  {
-    name: "Node",
-    runtime: ["node", "bun"],
-    pkg: "../transports/node.js",
-    export: "NodeTransport",
-    priority: 10,
-  },
-];
-
-export async function resolveTransport(
-  config: HttpClientOptions,
-): Promise<HyperTransport> {
-  if (config.customTransport) {
-    config.logger?.("debug", "Using user-provided custom transport.");
-    return config.customTransport;
-  }
-
-  const runtime = getRuntime();
-  const candidates = TRANSPORTS.filter((t) => t.runtime.includes(runtime)).sort(
-    (a, b) => b.priority - a.priority,
-  );
-
-  const localRequire = createRequire(process.cwd() + "/package.json");
-
-  for (const t of candidates) {
-    config.logger?.("debug", `Loading transport: ${t.name}`);
-    try {
-      const path = t.pkg.startsWith(".")
-        ? new URL(t.pkg, import.meta.url).href
-        : localRequire.resolve(t.pkg);
-
-      const mod = await import(path);
-      const Transport = mod[t.export] || mod.default?.[t.export] || mod.default;
-
-      if (!Transport) continue;
-
-      config.logger?.("info", `Selected transport: ${t.name}`);
-      return new Transport(config);
-    } catch (e) {
-      config.logger?.("debug", `Skip ${t.name}: ${e}`);
-    }
-  }
-
-  throw new Error(
-    `No compatible transport implementation available for runtime: ${runtime}`,
-  );
-}
-
 export class HyperCore implements IHyperCore {
   public config: HttpClientOptions;
-  private transport: HyperTransport | null = null;
-  private transportPromise: Promise<HyperTransport> | null = null;
+  private readonly transportManager: TransportManager;
   private readonly defaultHeaders: Record<string, string | string[]>;
   private readonly pluginCtx: PluginContext;
   private readonly pipelines = createPipelines();
@@ -136,97 +56,82 @@ export class HyperCore implements IHyperCore {
       network: { ...defaultConfig.network, ...config.network },
     };
 
-    if (transport) {
-      this.transport = transport;
-      this.transportPromise = Promise.resolve(transport);
-      if ("config" in transport) {
-        (transport as { config?: HttpClientOptions }).config = this.config;
-      }
-    }
+    this.transportManager = new TransportManager(this.config, transport);
 
-    this.defaultHeaders = {
+    this.defaultHeaders = normalizeHeaders({
       Accept: "application/json, text/plain, */*",
       "Accept-Encoding": "gzip, deflate, br",
       "User-Agent": this.config.network?.userAgent ?? "Hyperttp/2.0",
       ...this.config.network?.headers,
-    };
+    });
 
     this.pluginCtx = { config: this.config, core: this };
   }
 
-  private async createTransport(): Promise<HyperTransport> {
-    return resolveTransport(this.config);
+  private get transport(): HyperTransport | null {
+    return this.transportManager.instance;
   }
 
   private ensureTransport(): Promise<HyperTransport> {
-    return (
-      this.transportPromise ||
-      (this.transportPromise = this.createTransport().then((t) => {
-        this.transport = t;
-        return t;
-      }))
-    );
+    return this.transportManager.get();
+  }
+
+  /**
+   * Центральный метод обработки запросов
+   */
+  private async dispatchInternal<T = unknown>(
+    req: InternalRequest,
+  ): Promise<HttpResponse<T> | StreamResponse<T>> {
+    try {
+      if (this.pipelines.request.length > 0) {
+        const shortCircuit = await executeRequestPipeline(
+          this.pipelines.request,
+          req,
+          this.pluginCtx,
+        );
+        if (shortCircuit) {
+          await this.runResponsePipeline(shortCircuit, req);
+          return shortCircuit as HttpResponse<T>;
+        }
+      }
+
+      req.headers = normalizeHeaders(req.headers);
+
+      const transport = this.transport || (await this.ensureTransport());
+      let rawResponse = await transport.execute(req as TransportArgs);
+
+      if (this.pipelines.responseData.length > 0) {
+        rawResponse = await executeResponseDataPipeline(
+          this.pipelines.responseData,
+          rawResponse,
+          this.pluginCtx,
+        );
+      }
+
+      this.applyDecompression(rawResponse);
+
+      const isStream = req.meta?.responseType === "stream";
+      const response = isStream
+        ? mapStreamFast(rawResponse)
+        : mapResponseFast(rawResponse);
+
+      await this.runResponsePipeline(response, req);
+
+      return response as unknown as HttpResponse<T>;
+    } catch (error) {
+      return this.handleDispatchError(error as Error, req);
+    }
   }
 
   public async dispatch<T = unknown>(
     req: InternalRequest,
   ): Promise<HttpResponse<T>> {
-    try {
-      const shortCircuit = await executeRequestPipeline(
-        this.pipelines.request,
-        req,
-        this.pluginCtx,
-      );
-      if (shortCircuit) {
-        await executeResponsePipeline(
-          this.pipelines.responseMutators,
-          this.pipelines.responseSideEffects,
-          shortCircuit,
-          req,
-          this.pluginCtx,
-          this.config.logger,
-        );
-        return shortCircuit as HttpResponse<T>;
-      }
-
-      const transport = this.transport || (await this.ensureTransport());
-      const rawResponse = await transport.execute(req as TransportArgs);
-      const response = mapResponseFast(rawResponse);
-
-      await executeResponsePipeline(
-        this.pipelines.responseMutators,
-        this.pipelines.responseSideEffects,
-        response,
-        req,
-        this.pluginCtx,
-        this.config.logger,
-      );
-      return response as unknown as HttpResponse<T>;
-    } catch (error) {
-      const httpError = error as HyperttpError;
-      const recovered = await executeErrorPipeline(
-        this.pipelines.error,
-        httpError,
-        req,
-        this.pluginCtx,
-      );
-
-      if (recovered) {
-        await executeResponsePipeline(
-          this.pipelines.responseMutators,
-          this.pipelines.responseSideEffects,
-          recovered,
-          req,
-          this.pluginCtx,
-          this.config.logger,
-        );
-        return recovered as HttpResponse<T>;
-      }
-
-      throw error;
-    }
+    return this.dispatchInternal<T>(req) as Promise<HttpResponse<T>>;
   }
 
+  /**
+   * Регистрация плагинов
+   */
   public use(plugin: HyperPlugin): this {
     const isEnabled = plugin.enabled ? plugin.enabled(this.config) : true;
     if (!isEnabled) return this;
@@ -244,19 +149,23 @@ export class HyperCore implements IHyperCore {
     }
 
     if (plugin.onResponse) {
-      if (plugin.mode === "background") {
-        insertHookSorted(this.pipelines.responseSideEffects, {
-          name: plugin.name,
-          priority,
-          run: plugin.onResponse,
-        });
-      } else {
-        insertHookSorted(this.pipelines.responseMutators, {
-          name: plugin.name,
-          priority,
-          run: plugin.onResponse,
-        });
-      }
+      const targetPipeline =
+        plugin.mode === "background"
+          ? this.pipelines.responseSideEffects
+          : this.pipelines.responseMutators;
+      insertHookSorted(targetPipeline, {
+        name: plugin.name,
+        priority,
+        run: plugin.onResponse,
+      });
+    }
+
+    if (plugin.onResponseData) {
+      insertHookSorted(this.pipelines.responseData, {
+        name: plugin.name,
+        priority,
+        run: plugin.onResponseData,
+      });
     }
 
     if (plugin.onError) {
@@ -270,27 +179,33 @@ export class HyperCore implements IHyperCore {
     return this;
   }
 
+  /**
+   * Публичные HTTP методы-помощники
+   */
   public async stream(
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<StreamResponse<unknown>> {
-    const isStr = typeof req === "string";
-    const url = isStr ? req : req.url;
-    const reqHeaders = isStr ? undefined : req.headers;
-    const finalSignal = isStr ? signal : (req.signal ?? signal);
+    const internalReq = this.buildInternalRequest(
+      "GET",
+      req,
+      undefined,
+      signal,
+    );
+    internalReq.meta = { ...internalReq.meta, responseType: "stream" };
+    return this.dispatchInternal(internalReq) as Promise<
+      StreamResponse<unknown>
+    >;
+  }
 
-    const transportArgs: TransportArgs = {
-      method: normalizeMethod("GET"),
-      url,
-      headers: normalizeHeaders(
-        mergeHeadersFast(this.defaultHeaders, reqHeaders),
-      ),
-      signal: finalSignal,
-    };
-
-    const transport = this.transport || (await this.ensureTransport());
-    const rawResponse = await transport.execute(transportArgs);
-    return mapStreamFast(rawResponse);
+  public async postStream<T = unknown>(
+    req: RequestInterface | string,
+    body?: RequestBodyData,
+    signal?: AbortSignal,
+  ): Promise<StreamResponse<T>> {
+    const internalReq = this.buildInternalRequest("POST", req, body, signal);
+    internalReq.meta = { ...internalReq.meta, responseType: "stream" };
+    return this.dispatchInternal(internalReq) as Promise<StreamResponse<T>>;
   }
 
   public get<T = unknown>(
@@ -310,31 +225,6 @@ export class HyperCore implements IHyperCore {
     return this.dispatch<T>(
       this.buildInternalRequest("POST", req, body, signal),
     );
-  }
-
-  public async postStream<T = unknown>(
-    req: RequestInterface | string,
-    body?: RequestBodyData,
-    signal?: AbortSignal,
-  ): Promise<StreamResponse<T>> {
-    const isStr = typeof req === "string";
-    const url = isStr ? req : req.url;
-    const reqHeaders = isStr ? undefined : req.headers;
-    const finalSignal = isStr ? signal : (req.signal ?? signal);
-
-    const transportArgs: TransportArgs = {
-      method: normalizeMethod("POST"),
-      url,
-      headers: normalizeHeaders(
-        mergeHeadersFast(this.defaultHeaders, reqHeaders),
-      ),
-      body: normalizeBody("POST", isStr ? body : (req.body ?? body)),
-      signal: finalSignal,
-    };
-
-    const transport = this.transport || (await this.ensureTransport());
-    const rawResponse = await transport.execute(transportArgs);
-    return mapStreamFast(rawResponse) as unknown as StreamResponse<T>;
   }
 
   public put<T = unknown>(
@@ -385,111 +275,7 @@ export class HyperCore implements IHyperCore {
     );
   }
 
-  private buildInternalRequest(
-    method: Method,
-    req: RequestInterface | string,
-    body?: RequestBodyData,
-    signal?: AbortSignal,
-  ): InternalRequest {
-    const isStr = typeof req === "string";
-    let rawUrl = isStr ? req : req?.url;
-
-    if (!rawUrl && !isStr && req && "scheme" in req && "host" in req) {
-      const casted = req as any;
-      try {
-        const cleanHost = String(casted.host).replace(/^https?:\/\//i, "");
-        const urlObj = new URL(`${casted.scheme}://${cleanHost}`);
-
-        if (casted.port) urlObj.port = String(casted.port);
-        if (casted.path) urlObj.pathname = casted.path;
-
-        if (casted.query) {
-          for (const [key, value] of Object.entries(casted.query)) {
-            if (value == null) continue;
-            if (Array.isArray(value)) {
-              value.forEach((v) => urlObj.searchParams.append(key, String(v)));
-            } else {
-              urlObj.searchParams.set(key, String(value));
-            }
-          }
-        }
-        rawUrl = urlObj.toString();
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      } catch (_e: unknown) {
-        //
-      }
-    }
-
-    if (this.config.baseURL && rawUrl && !/^https?:\/\//i.test(rawUrl)) {
-      rawUrl = new URL(rawUrl, this.config.baseURL).toString();
-    }
-
-    if (!rawUrl) {
-      throw new Error(
-        `[HyperttpCore] Critical execution failure during ${method} method invocation: 'url' resolved to undefined. ` +
-          `Verify incoming arguments or environment configurations.`,
-      );
-    }
-
-    if (isStr) {
-      return {
-        method: normalizeMethod(method),
-        url: rawUrl,
-        headers: normalizeHeaders(this.defaultHeaders),
-        body,
-        signal,
-        meta: undefined,
-      };
-    }
-
-    const castedReq = req as any;
-    const rawHeaders = req.headers ?? castedReq._headers;
-
-    const headers = rawHeaders
-      ? (mergeHeadersFast(this.defaultHeaders, rawHeaders) as Record<
-          string,
-          string | string[]
-        >)
-      : ({ ...this.defaultHeaders } as Record<string, string | string[]>);
-
-    const internalRequest: InternalRequest = {
-      method: normalizeMethod(method),
-      url: rawUrl,
-      headers: normalizeHeaders(headers),
-      body: normalizeBody(
-        method,
-        castedReq.body ?? castedReq._bodyData ?? body,
-      ),
-      signal: req.signal ?? castedReq._signal ?? signal,
-      meta: (req.meta ?? castedReq._meta) as InternalRequest["meta"],
-    };
-
-    this.config.logger?.(
-      "debug",
-      `[HyperttpCore] Internal request dispatched: { ` +
-        `method: "${internalRequest.method}", ` +
-        `url: "${internalRequest.url}", ` +
-        `headersCount: ${Object.keys(internalRequest.headers).length}, ` +
-        `bodyType: "${typeof internalRequest.body}", ` +
-        `bodyLength: ${typeof internalRequest.body === "string" ? internalRequest.body.length : 0} ` +
-        `}`,
-    );
-
-    return internalRequest;
-  }
-
-  public extend(options: Partial<HttpClientOptions>): this {
-    this.config = {
-      ...this.config,
-      ...options,
-      network: { ...this.config.network, ...options.network },
-    };
-
-    (this.pluginCtx as { config: HttpClientOptions }).config = this.config;
-    return this;
-  }
-
-  public create(options: Partial<HttpClientOptions>): HyperCore {
+  public extend(options: Partial<HttpClientOptions>): HyperCore {
     return new HyperCore(
       {
         ...this.config,
@@ -500,57 +286,257 @@ export class HyperCore implements IHyperCore {
     );
   }
 
-  public async destroy(graceful = true): Promise<void> {
-    this.config.logger?.("debug", "Destroying transport...");
-    const transport = this.transport;
-    if (!transport) return;
+  public create(options: Partial<HttpClientOptions>): HyperCore {
+    return this.extend(options);
+  }
 
-    if (graceful && typeof transport.close === "function") {
-      await transport.close();
-    } else if (typeof transport.destroy === "function") {
-      await transport.destroy();
-    }
+  public async destroy(graceful = true): Promise<void> {
+    await this.transportManager.destroy(graceful);
   }
 
   public async json<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<T> {
-    const method =
-      typeof req === "string"
-        ? "GET"
-        : ((req as { method?: Method }).method ?? "GET");
-    const res = await this.dispatch<unknown>(
-      this.buildInternalRequest(method, req, undefined, signal),
-    );
-    return res.json!<T>();
+    const res = await this.dispatchShortcut(req, signal);
+    if (!res.json)
+      throw new Error(
+        "[HyperCore] Method 'json()' is missing on response object.",
+      );
+    return res.json<T>();
   }
 
   public async text(
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<string> {
-    const method =
-      typeof req === "string"
-        ? "GET"
-        : ((req as { method?: Method }).method ?? "GET");
-    const res = await this.dispatch<unknown>(
-      this.buildInternalRequest(method, req, undefined, signal),
-    );
-    return res.text!();
+    const res = await this.dispatchShortcut(req, signal);
+    if (!res.text)
+      throw new Error(
+        "[HyperCore] Method 'text()' is missing on response object.",
+      );
+    return res.text();
   }
 
   public async dump(
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<void> {
+    const res = await this.dispatchShortcut(req, signal);
+    if (!res.dump)
+      throw new Error(
+        "[HyperCore] Method 'dump()' is missing on response object.",
+      );
+    await res.dump();
+  }
+
+  /**
+   * ПРИВАТНЫЕ МЕТОДЫ-ПОМОЩНИКИ (РЕФАКТОРИНГ)
+   */
+
+  private async runResponsePipeline(
+    response: HttpResponse | StreamResponse<unknown>,
+    req: InternalRequest,
+  ): Promise<void> {
+    const hasMutators = this.pipelines.responseMutators.length > 0;
+    const hasSideEffects = this.pipelines.responseSideEffects.length > 0;
+
+    if (hasMutators || hasSideEffects) {
+      await executeResponsePipeline(
+        this.pipelines.responseMutators,
+        this.pipelines.responseSideEffects,
+        response as HttpResponse,
+        req,
+        this.pluginCtx,
+        this.config.logger,
+      );
+    }
+  }
+
+  /**
+   * Изолированная обработка ошибок пайплайна ответа
+   */
+  private async handleDispatchError<T>(
+    error: Error,
+    req: InternalRequest,
+  ): Promise<HttpResponse<T> | StreamResponse<T>> {
+    if (this.pipelines.error.length > 0) {
+      const recovered = await executeErrorPipeline(
+        this.pipelines.error,
+        error as HyperttpError,
+        req,
+        this.pluginCtx,
+      );
+      if (recovered) {
+        await this.runResponsePipeline(recovered, req);
+        return recovered as HttpResponse<T>;
+      }
+    }
+    throw error;
+  }
+
+  /**
+   * Применение встроенной декомпрессии на основе заголовков ответа транспорта
+   */
+  private applyDecompression(rawResponse: any): void {
+    if (!rawResponse.body) return;
+
+    const encodingHeader =
+      rawResponse.headers?.["content-encoding"] ??
+      rawResponse.headers?.["Content-Encoding"];
+    if (!encodingHeader) return;
+
+    const contentEncoding =
+      typeof encodingHeader === "string"
+        ? encodingHeader
+        : Array.isArray(encodingHeader)
+          ? encodingHeader[0]
+          : undefined;
+
+    if (!contentEncoding) return;
+
+    if (rawResponse.body instanceof Uint8Array) {
+      rawResponse.body = decompressBuffer(rawResponse.body, contentEncoding);
+    } else {
+      rawResponse.body = createDecompressStream(
+        rawResponse.body as ReadableStream<Uint8Array>,
+        contentEncoding,
+      );
+    }
+  }
+
+  /**
+   * Сборка внутреннего объекта запроса InternalRequest
+   */
+  private buildInternalRequest(
+    method: Method,
+    req: RequestInterface | string,
+    body?: RequestBodyData,
+    signal?: AbortSignal,
+  ): InternalRequest {
+    const isStr = typeof req === "string";
+    const rawUrl = normalizeUrl(req);
+
+    if (!rawUrl) {
+      throw new Error(
+        `[HyperCore] Critical failure: 'url' resolved to undefined for ${method}.`,
+      );
+    }
+
+    const urlObj = new URL(rawUrl);
+    const castedReq = isStr
+      ? undefined
+      : (req as unknown as Record<string, unknown>);
+
+    if (castedReq?.query) {
+      this.appendQueryParams(
+        urlObj,
+        castedReq.query as Record<string, unknown>,
+      );
+    }
+
+    const context = {
+      method,
+      url: urlObj.href,
+      origin: urlObj.origin,
+      path: urlObj.pathname + urlObj.search,
+    };
+
+    if (isStr) {
+      return {
+        ...context,
+        headers: { ...this.defaultHeaders },
+        body,
+        signal,
+        meta: {},
+      } as unknown as InternalRequest;
+    }
+
+    const rawHeaders = (req.headers ?? castedReq!._headers) as
+      | Record<string, string | string[]>
+      | undefined;
+    const headers = rawHeaders
+      ? normalizeHeaders(mergeHeadersFast(this.defaultHeaders, rawHeaders))
+      : { ...this.defaultHeaders };
+
+    const rawBody =
+      castedReq!.body ?? castedReq!.bodyData ?? castedReq!._bodyData ?? body;
+    const computedBody = normalizeBody(method, rawBody);
+
+    const computedSignal =
+      req.signal ?? (castedReq!._signal as AbortSignal | undefined) ?? signal;
+    const meta = (req.meta ??
+      castedReq!._meta ??
+      {}) as InternalRequest["meta"];
+
+    return this.createInternalRequestObject(castedReq!, {
+      ...context,
+      headers,
+      body: computedBody,
+      signal: computedSignal,
+      meta,
+    });
+  }
+
+  /**
+   * Фабрика сохранения прототипа исходного запроса с подменой дескрипторов базовых свойств
+   */
+  private createInternalRequestObject(
+    sourceReq: Record<string, unknown>,
+    overrides: Record<string, unknown>,
+  ): InternalRequest {
+    const proto = Object.getPrototypeOf(sourceReq);
+    const target =
+      proto && proto !== Object.prototype ? Object.create(proto) : {};
+
+    Object.defineProperties(
+      target,
+      Object.getOwnPropertyDescriptors(sourceReq),
+    );
+
+    const propertyDescriptors: PropertyDescriptorMap = {};
+    for (const [key, value] of Object.entries(overrides)) {
+      propertyDescriptors[key] = {
+        value,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      };
+    }
+
+    Object.defineProperties(target, propertyDescriptors);
+    return target as InternalRequest;
+  }
+
+  private appendQueryParams(url: URL, query?: Record<string, unknown>): void {
+    if (!query) return;
+
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) continue;
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (item === undefined || item === null) continue;
+          url.searchParams.append(key, String(item));
+        }
+      } else {
+        url.searchParams.set(key, String(value));
+      }
+    }
+  }
+
+  private async dispatchShortcut(
+    req: RequestInterface | string,
+    signal?: AbortSignal,
+  ): Promise<HttpResponse<unknown>> {
     const method =
       typeof req === "string"
         ? "GET"
-        : ((req as { method?: Method }).method ?? "GET");
-    const res = await this.dispatch<unknown>(
+        : (((req as unknown as Record<string, unknown>).method as
+            | Method
+            | undefined) ?? "GET");
+    return this.dispatch<unknown>(
       this.buildInternalRequest(method, req, undefined, signal),
     );
-    await res.dump!();
   }
 }
