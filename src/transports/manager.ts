@@ -12,10 +12,22 @@ import type {
 
 import { mapResponseFast, mapStreamFast } from "../utils/response.js";
 
+/**
+ * @ru Тип среды выполнения: Bun или Node.js.
+ * @en Runtime environment: Bun or Node.js.
+ */
 export type Runtime = "bun" | "node";
 
+/**
+ * @ru Конструктор транспорта, принимающий конфигурацию клиента.
+ * @en Transport constructor accepting client configuration.
+ */
 type TransportCtor = new (config: HttpClientOptions) => HyperTransport;
 
+/**
+ * @ru Описание доступного транспорта: имя, поддерживаемые рантаймы, пакет, экспортируемое имя, приоритет.
+ * @en Transport definition: name, supported runtimes, package, export name, priority.
+ */
 type TransportDef = {
   name: string;
   runtime: Runtime[];
@@ -24,13 +36,26 @@ type TransportDef = {
   priority: number;
 };
 
+/**
+ * @ru Определение текущей среды выполнения (Bun или Node) на основе глобальных объектов.
+ * @en Detects the current runtime (Bun or Node) based on global objects.
+ */
 export const CURRENT_RUNTIME: Runtime =
   typeof Bun !== "undefined" ? "bun" : "node";
 
+/**
+ * @ru Возвращает текущую среду выполнения.
+ * @en Returns the current runtime.
+ * @returns The current runtime ('bun' or 'node').
+ */
 export function getRuntime(): Runtime {
   return CURRENT_RUNTIME;
 }
 
+/**
+ * @ru Список доступных транспортов с приоритетами. Высший приоритет — предпочтительный транспорт для рантайма.
+ * @en List of available transports with priorities. Higher priority means preferred transport for the runtime.
+ */
 export const TRANSPORTS: TransportDef[] = [
   {
     name: "Bun",
@@ -57,6 +82,10 @@ export const TRANSPORTS: TransportDef[] = [
   },
 ];
 
+/**
+ * @ru Кэш кандидатов транспорта для каждого рантайма, отсортированных по убыванию приоритета.
+ * @en Cache of transport candidates per runtime, sorted by descending priority.
+ */
 const CANDIDATES_MAP: Record<Runtime, TransportDef[]> = {
   node: TRANSPORTS.filter((t) => t.runtime.includes("node")).sort(
     (a, b) => b.priority - a.priority,
@@ -67,9 +96,20 @@ const CANDIDATES_MAP: Record<Runtime, TransportDef[]> = {
   ),
 };
 
+/**
+ * @ru Глобальный кэш загруженных классов транспорта для каждого рантайма (избегаем повторной загрузки).
+ * @en Global cache of loaded transport classes per runtime (avoids re-loading).
+ */
 const GLOBAL_TRANSPORT_CLASS_CACHE: Partial<Record<Runtime, TransportCtor>> =
   Object.create(null);
 
+/**
+ * @ru Логирует ошибку в зависимости от конфигурации (verbose, logger).
+ * @en Logs an error according to configuration (verbose, logger).
+ * @param config - Client configuration.
+ * @param message - Log message.
+ * @param err - Error object.
+ */
 function logError(
   config: HttpClientOptions,
 
@@ -102,6 +142,12 @@ function logError(
   }
 }
 
+/**
+ * @ru Проверяет, является ли ошибка "модуль не найден" (пропускаем такие транспорты).
+ * @en Checks if the error indicates a missing module (skip such transports).
+ * @param err - Error to check.
+ * @returns True if module not found.
+ */
 function isModuleNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const code = (err as HyperttpError).code;
@@ -114,6 +160,12 @@ function isModuleNotFoundError(err: unknown): boolean {
   );
 }
 
+/**
+ * @ru Разрешает путь к модулю транспорта: для относительных путей использует import.meta.resolve, для пакетов — resolve-from + import.meta.resolve.
+ * @en Resolves the module path for a transport: for relative paths uses import.meta.resolve, for packages uses resolve-from + import.meta.resolve.
+ * @param pkg - Package name or relative path.
+ * @returns Resolved URL string or null if not found.
+ */
 async function resolveTransportModulePath(pkg: string): Promise<string | null> {
   if (pkg.startsWith(".")) {
     try {
@@ -136,6 +188,13 @@ async function resolveTransportModulePath(pkg: string): Promise<string | null> {
   }
 }
 
+/**
+ * @ru Загружает конструктор транспорта из указанного пакета и экспорта.
+ * @en Loads a transport constructor from the given package and export.
+ * @param pkg - Package name or path.
+ * @param exportName - Export name.
+ * @returns Transport constructor or null.
+ */
 async function loadTransportCtor(
   pkg: string,
   exportName: string,
@@ -154,6 +213,13 @@ async function loadTransportCtor(
   return candidate as TransportCtor;
 }
 
+/**
+ * @ru Разрешает и создаёт экземпляр транспорта на основе конфигурации и текущей среды выполнения. Использует кэш классов.
+ * @en Resolves and creates a transport instance based on configuration and the current runtime. Uses class cache.
+ * @param config - Client configuration.
+ * @returns Promise resolving to a transport instance.
+ * @throws If no compatible transport is available.
+ */
 export async function resolveTransport(
   config: HttpClientOptions,
 ): Promise<HyperTransport> {
@@ -239,13 +305,21 @@ export async function resolveTransport(
   );
 }
 
+/**
+ * @ru Менеджер транспорта: ленивая загрузка, кэширование, синхронизация конфигурации, выполнение запросов, уничтожение.
+ * @en Transport manager: lazy loading, caching, config synchronization, request execution, destruction.
+ */
 export class TransportManager {
   private transport: HyperTransport | null = null;
-
   private transportPromise: Promise<HyperTransport> | null = null;
-
   private config: HttpClientOptions;
 
+  /**
+   * @ru Создаёт менеджер транспорта.
+   * @en Creates a transport manager.
+   * @param config - Client configuration.
+   * @param customTransport - Optional pre-created transport instance.
+   */
   constructor(config: HttpClientOptions, customTransport?: HyperTransport) {
     this.config = config;
     if (customTransport) {
@@ -255,15 +329,29 @@ export class TransportManager {
     }
   }
 
+  /**
+   * @ru Обновляет конфигурацию клиента и синхронизирует её с активным транспортом (если есть).
+   * @en Updates the client configuration and syncs it with the active transport (if any).
+   * @param config - New configuration.
+   */
   public setConfig(config: HttpClientOptions): void {
     this.config = config;
     this.syncConfig();
   }
 
+  /**
+   * @ru Возвращает текущий экземпляр транспорта (если уже загружен).
+   * @en Returns the current transport instance (if already loaded).
+   */
   public get instance(): HyperTransport | null {
     return this.transport;
   }
 
+  /**
+   * @ru Асинхронно получает транспорт (ленивая загрузка).
+   * @en Asynchronously gets the transport (lazy loading).
+   * @returns Promise resolving to transport instance.
+   */
   public async get(): Promise<HyperTransport> {
     if (this.transport) return this.transport;
     if (this.transportPromise) return this.transportPromise;
@@ -277,12 +365,22 @@ export class TransportManager {
     return this.transportPromise;
   }
 
+  /**
+   * @ru Синхронизирует конфигурацию с транспортом, если транспорт имеет свойство config.
+   * @en Syncs configuration with the transport if the transport has a config property.
+   */
   private syncConfig(): void {
     if (this.transport && "config" in this.transport) {
       (this.transport as { config?: HttpClientOptions }).config = this.config;
     }
   }
 
+  /**
+   * @ru Выполняет запрос и возвращает стандартный HttpResponse (не поток).
+   * @en Executes a request and returns a standard HttpResponse (non-stream).
+   * @param req - Request parameters for transport.
+   * @returns Promise with HTTP response.
+   */
   public async execute<T = unknown>(
     req: Parameters<HyperTransport["execute"]>[0],
   ): Promise<HttpResponse<T>> {
@@ -291,6 +389,12 @@ export class TransportManager {
     return mapResponseFast(rawResponse) as unknown as HttpResponse<T>;
   }
 
+  /**
+   * @ru Выполняет запрос и возвращает потоковый ответ (StreamResponse).
+   * @en Executes a request and returns a stream response (StreamResponse).
+   * @param req - Request parameters for transport.
+   * @returns Promise with stream response.
+   */
   public async executeStream<T = unknown>(
     req: Parameters<HyperTransport["execute"]>[0],
   ): Promise<StreamResponse<T>> {
@@ -299,6 +403,12 @@ export class TransportManager {
     return mapStreamFast(rawResponse) as StreamResponse<T>;
   }
 
+  /**
+   * @ru Уничтожает транспорт: закрывает соединения (graceful) или принудительно разрушает.
+   * @en Destroys the transport: closes connections (graceful) or forces destruction.
+   * @param graceful - If true, attempts graceful shutdown via close(). Otherwise destroys.
+   * @returns Promise that resolves when destruction is complete.
+   */
   public async destroy(graceful = true): Promise<void> {
     const transport = this.transport;
     if (!transport) return;

@@ -18,11 +18,21 @@ export interface NodeTransportConfig extends HttpClientOptions {
   };
 }
 
+/**
+ * @ru Реализация HTTP-транспорта на основе встроенных модулей Node.js (http/https). Поддерживает keep-alive, пулы соединений, автоматический Content-Length, обработку abort-сигналов.
+ * @en HTTP transport implementation based on Node.js built-in modules (http/https). Supports keep-alive, connection pools, automatic Content-Length, and abort signal handling.
+ */
 export class NodeTransport implements HyperTransport {
+  /** @ru Конфигурация транспорта. @en Transport configuration. */
   public config: NodeTransportConfig;
   private readonly httpAgent: http.Agent;
   private readonly httpsAgent: https.Agent;
 
+  /**
+   * @ru Создаёт экземпляр NodeTransport.
+   * @en Creates a NodeTransport instance.
+   * @param config - Transport configuration.
+   */
   constructor(config: NodeTransportConfig) {
     this.config = config;
 
@@ -45,6 +55,15 @@ export class NodeTransport implements HyperTransport {
     return this.config.baseUrl ?? "http://localhost:3000";
   }
 
+  /**
+   * @ru Выполняет HTTP-запрос.
+   * @en Executes an HTTP request.
+   * @param req - Request parameters (url, method, headers, body, signal).
+   * @returns Promise with the transport response.
+   * @throws If the request is aborted (AbortError).
+   * @throws If localhost URL is used in production environment.
+   * @throws On network or protocol errors.
+   */
   public async execute(req: TransportRequest): Promise<TransportResponse> {
     const fullUrl = new URL(req.url, this.baseUrl);
 
@@ -63,16 +82,13 @@ export class NodeTransport implements HyperTransport {
       throw abortError;
     }
 
-    // Клонируем заголовки, чтобы не мутировать исходный объект запроса
     const headers = { ...req.headers } as Record<string, string | string[]>;
 
-    // Хелпер для регистронезависимой проверки заголовков
     const hasHeader = (name: string) =>
       Object.keys(headers).some((k) => k.toLowerCase() === name.toLowerCase());
 
     let finalBody: any = req.body;
 
-    // Автоматический расчет Content-Length для не-стримовых данных
     if (finalBody !== undefined && finalBody !== null) {
       if (Buffer.isBuffer(finalBody)) {
         if (!hasHeader("content-length")) {
@@ -85,7 +101,6 @@ export class NodeTransport implements HyperTransport {
           );
         }
       } else if (!(finalBody instanceof ReadableStream)) {
-        // Сериализуем объект один раз здесь
         finalBody = JSON.stringify(finalBody);
         if (!hasHeader("content-length")) {
           headers["Content-Length"] = String(
@@ -186,11 +201,21 @@ export class NodeTransport implements HyperTransport {
     });
   }
 
+  /**
+   * @ru Закрывает все активные соединения (graceful shutdown). Уничтожает HTTP/HTTPS агенты.
+   * @en Closes all active connections (graceful shutdown). Destroys HTTP/HTTPS agents.
+   * @returns Promise that resolves after closing.
+   */
   public async close(): Promise<void> {
     this.httpAgent.destroy();
     this.httpsAgent.destroy();
   }
 
+  /**
+   * @ru Принудительно уничтожает транспорт (аналог close).
+   * @en Forcefully destroys the transport (alias for close).
+   * @returns Promise that resolves after destruction.
+   */
   public async destroy(): Promise<void> {
     await this.close();
   }

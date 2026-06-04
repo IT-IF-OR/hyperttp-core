@@ -11,6 +11,10 @@ export type NormalizedBody =
   | null
   | undefined;
 
+/**
+ * @ru Множество заголовков, которые должны иметь только одно значение (не объединяются при повторении).
+ * @en Set of headers that should have only a single value (not merged when repeated).
+ */
 const SINGLE_VALUE_HEADERS: Record<string, boolean> = Object.create(null);
 const svh = [
   "content-type",
@@ -31,6 +35,10 @@ for (let i = 0; i < svh.length; i++) {
   SINGLE_VALUE_HEADERS[svh[i]!] = true;
 }
 
+/**
+ * @ru Кэш нормализованных методов HTTP для быстрого доступа.
+ * @en Cache of normalized HTTP methods for fast lookup.
+ */
 const METHOD_CACHE: Record<string, Method> = {
   get: "GET",
   GET: "GET",
@@ -48,12 +56,25 @@ const METHOD_CACHE: Record<string, Method> = {
   OPTIONS: "OPTIONS",
 };
 
+/**
+ * @ru Нормализует метод HTTP: приводит к верхнему регистру, использует кэш для часто встречающихся методов.
+ * @en Normalizes an HTTP method: converts to uppercase, uses cache for common methods.
+ * @param method - Raw method string (e.g., 'get', 'POST').
+ * @returns Normalized uppercase method.
+ */
 export function normalizeMethod(method: string): Method {
   const cached = METHOD_CACHE[method];
   if (cached !== undefined) return cached;
   return method.toUpperCase() as Method;
 }
 
+/**
+ * @ru Извлекает URL из объекта запроса или строки. Поддерживает поля url, _url, или комбинацию scheme/host/path.
+ * @en Extracts a URL from a request object or string. Supports url, _url fields, or scheme/host/path combination.
+ * @param req - Request object or URL string.
+ * @returns Normalized URL string.
+ * @throws If URL cannot be resolved.
+ */
 export function normalizeUrl(req: any): string {
   if (typeof req === "string") return req;
 
@@ -68,6 +89,12 @@ export function normalizeUrl(req: any): string {
   throw new Error("URL missing in request");
 }
 
+/**
+ * @ru Нормализует заголовки из различных форматов (массив, объект) в единый объект с правильной обработкой множественных значений (cookie, set-cookie).
+ * @en Normalizes headers from various formats (array, object) into a single object with proper handling of multi-value headers (cookie, set-cookie).
+ * @param headers - Raw headers in array or object format.
+ * @returns Normalized headers object where values are strings or arrays of strings (for set-cookie).
+ */
 export function normalizeHeaders(
   headers: unknown,
 ): Record<string, string | string[]> {
@@ -199,6 +226,13 @@ export function normalizeHeaders(
   return out;
 }
 
+/**
+ * @ru Нормализует тело запроса: для методов GET и HEAD тело всегда undefined, для остальных возвращает переданное тело.
+ * @en Normalizes request body: for GET and HEAD methods body is always undefined, for others returns the provided body.
+ * @param method - HTTP method.
+ * @param body - Raw request body.
+ * @returns Normalized body or undefined.
+ */
 export function normalizeBody(
   method: Method,
   body: RequestBodyData | undefined,

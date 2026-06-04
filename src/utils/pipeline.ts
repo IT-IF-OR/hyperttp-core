@@ -13,24 +13,37 @@ import type {
  * @en Hook record structure with metadata for optimization and sorting.
  */
 export interface HookRecord<T> {
+  /** @ru Уникальное имя хука. @en Unique hook name. */
   readonly name: string;
+  /** @ru Приоритет выполнения (выше значение — раньше выполнение). @en Execution priority (higher value runs earlier). */
   readonly priority: number;
+  /** @ru Функция-обработчик. @en Handler function. */
   readonly run: T;
 }
 
+/**
+ * @ru Контейнер конвейеров для различных фаз обработки запроса/ответа.
+ * @en Pipeline container for different request/response processing phases.
+ */
 export interface PipelineContainer {
+  /** @ru Хуки, выполняемые перед отправкой запроса. @en Hooks executed before sending the request. */
   readonly request: HookRecord<Required<HyperPlugin>["onRequest"]>[];
+  /** @ru Хуки, обрабатывающие сырые данные транспорта. @en Hooks processing raw transport data. */
   readonly responseData: HookRecord<Required<HyperPlugin>["onResponseData"]>[];
+  /** @ru Хуки, мутирующие ответ (последовательное выполнение). @en Hooks that mutate the response (sequential execution). */
   readonly responseMutators: HookRecord<Required<HyperPlugin>["onResponse"]>[];
+  /** @ru Хуки с побочными эффектами (выполняются в фоне). @en Side-effect hooks (executed in the background). */
   readonly responseSideEffects: HookRecord<
     Required<HyperPlugin>["onResponse"]
   >[];
+  /** @ru Хуки для перехвата ошибок. @en Error interception hooks. */
   readonly error: HookRecord<Required<HyperPlugin>["onError"]>[];
 }
 
 /**
- * @ru Создает пустой контейнер для конвейеров плагинов.
+ * @ru Создаёт пустой контейнер для конвейеров плагинов.
  * @en Creates an empty container for plugin pipelines.
+ * @returns An empty pipeline container.
  */
 export function createPipelines(): PipelineContainer {
   return {
@@ -45,6 +58,8 @@ export function createPipelines(): PipelineContainer {
 /**
  * @ru Вставляет хук в массив с сохранением сортировки по убыванию приоритета (деревья поиска тут избыточны).
  * @en Inserts a hook into the array maintaining descending priority order.
+ * @param list - Target array to insert into.
+ * @param hook - Hook record to insert.
  */
 export function insertHookSorted<T>(
   list: HookRecord<T>[],
@@ -59,9 +74,12 @@ export function insertHookSorted<T>(
 }
 
 /**
- * @ru Выполняет конвейер пред-запроса. Поддерживает short-circuit (ранний возврат ответа).
- * Использует Fast-Path для синхронных хуков без аллокации микротасок.
+ * @ru Выполняет конвейер пред-запроса. Поддерживает short-circuit (ранний возврат ответа). Использует Fast-Path для синхронных хуков без аллокации микротасок.
  * @en Executes the pre-request pipeline. Supports short-circuiting with fast-path for sync hooks.
+ * @param hooks - Array of request hooks.
+ * @param req - Internal request object.
+ * @param ctx - Plugin context.
+ * @returns A response if short-circuited, null otherwise, or a promise.
  */
 export function executeRequestPipeline(
   hooks: readonly HookRecord<Required<HyperPlugin>["onRequest"]>[],
@@ -74,21 +92,22 @@ export function executeRequestPipeline(
   for (let i = 0; i < len; i++) {
     const res = hooks[i]!.run(req, ctx);
 
-    // Если хук асинхронный — переключаемся на медленный асинхронный путь
     if (res instanceof Promise) {
       return executeRequestPipelineAsync(hooks, req, ctx, i, res);
     }
 
-    // Если синхронный хук вернул ответ — прерываем выполнение (Short-Circuit)
     if (res != null) return res;
   }
   return null;
 }
 
 /**
- * @ru Выполняет низкоуровневый конвейер трансформации сырых данных транспорта (фаза DATA).
- * Если хук возвращает измененный TransportResponse, он передается дальше по цепочке.
- * @en Executes low-level transport data transformation pipeline (DATA phase).
+ * @ru Выполняет низкоуровневый конвейер трансформации сырых данных транспорта (фаза DATA). Если хук возвращает измененный TransportResponse, он передается дальше по цепочке.
+ * @en Executes low-level transport data transformation pipeline (DATA phase). If a hook returns a modified TransportResponse, it is passed along the chain.
+ * @param hooks - Array of response data hooks.
+ * @param res - Current transport response.
+ * @param ctx - Plugin context.
+ * @returns The (possibly transformed) transport response, either directly or wrapped in a promise.
  */
 export function executeResponseDataPipeline(
   hooks: readonly HookRecord<Required<HyperPlugin>["onResponseData"]>[],
@@ -120,9 +139,15 @@ export function executeResponseDataPipeline(
 }
 
 /**
- * @ru Выполняет конвейер пост-ответа. Разделен на мутаторы (последовательно) и сайд-эффекты (в фоне).
- * Оптимизирован для минимизации выделения памяти под замыкания логгера.
- * @en Executes the post-response pipeline. Split into mutators (sequential) and side-effects (background).
+ * @ru Выполняет конвейер пост-ответа. Разделен на мутаторы (последовательно) и сайд-эффекты (в фоне). Оптимизирован для минимизации выделения памяти под замыкания логгера.
+ * @en Executes the post-response pipeline. Split into mutators (sequential) and side-effects (background). Optimized to minimize memory allocations for logger closures.
+ * @param mutators - Hooks that mutate the response (executed sequentially).
+ * @param sideEffects - Hooks that run in background, errors are logged but do not break the main flow.
+ * @param res - HTTP response object.
+ * @param req - Internal request object.
+ * @param ctx - Plugin context.
+ * @param logger - Optional logger for side-effect errors.
+ * @returns A promise if any mutator returns a promise, otherwise void.
  */
 export function executeResponsePipeline(
   mutators: readonly HookRecord<Required<HyperPlugin>["onResponse"]>[],
@@ -163,7 +188,12 @@ export function executeResponsePipeline(
 
 /**
  * @ru Выполняет конвейер перехвата ошибок. Первый вернувший HttpResponse плагин прерывает панику.
- * @en Executes the error interception pipeline. First plugin to return HttpResponse stops the panic.
+ * @en Executes the error interception pipeline. The first plugin that returns HttpResponse stops the panic.
+ * @param hooks - Array of error hooks.
+ * @param error - The error that occurred.
+ * @param req - Internal request object.
+ * @param ctx - Plugin context.
+ * @returns A response if recovered, null otherwise, or a promise.
  */
 export function executeErrorPipeline(
   hooks: readonly HookRecord<Required<HyperPlugin>["onError"]>[],
@@ -185,10 +215,6 @@ export function executeErrorPipeline(
   }
   return null;
 }
-
-// ═════════════════════════════════════════════════════════════════════════════════════════
-// ВНУТРЕННИЕ АСИНХРОННЫЕ СЕГМЕНТЫ (ВЫНЕСЕНЫ ИЗ ГОРЯЧИХ ФУНКЦИЙ ДЛЯ ИДЕАЛЬНОГО JIT INLINING)
-// ═════════════════════════════════════════════════════════════════════════════════════════
 
 async function executeRequestPipelineAsync(
   hooks: readonly HookRecord<Required<HyperPlugin>["onRequest"]>[],
@@ -267,6 +293,10 @@ async function executeErrorPipelineAsync(
 
 /**
  * @ru Статический обработчик падений фоновых хуков. Изолирован для предотвращения регенерации замыканий.
+ * @en Static handler for background hook crashes. Isolated to prevent closure regeneration.
+ * @param err - Caught error.
+ * @param hookName - Name of the hook that failed.
+ * @param logger - Optional logger.
  */
 function handleSideEffectError(
   err: unknown,

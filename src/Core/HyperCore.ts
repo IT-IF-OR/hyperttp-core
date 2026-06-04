@@ -39,13 +39,24 @@ import {
 
 type TransportArgs = Parameters<HyperTransport["execute"]>[0];
 
+/**
+ * @ru Основной класс HTTP-клиента Hyperttp. Управляет транспортами, плагинами, перехватчиками, повторными попытками и сжатием.
+ * @en Core HTTP client class for Hyperttp. Manages transports, plugins, interceptors, retries, and compression.
+ */
 export class HyperCore implements IHyperCore {
+  /** @ru Конфигурация клиента (базовый URL, таймауты, заголовки и т.д.). @en Client configuration (base URL, timeouts, headers, etc.). */
   public config: HttpClientOptions;
   private readonly transportManager: TransportManager;
   private readonly defaultHeaders: Record<string, string | string[]>;
   private readonly pluginCtx: PluginContext;
   private readonly pipelines = createPipelines();
 
+  /**
+   * @ru Создаёт экземпляр HyperCore.
+   * @en Creates an instance of HyperCore.
+   * @param config - Client configuration options.
+   * @param transport - Optional custom transport implementation.
+   */
   constructor(
     config: HttpClientOptions = defaultConfig,
     transport?: HyperTransport,
@@ -76,9 +87,6 @@ export class HyperCore implements IHyperCore {
     return this.transportManager.get();
   }
 
-  /**
-   * Центральный метод обработки запросов
-   */
   private async dispatchInternal<T = unknown>(
     req: InternalRequest,
   ): Promise<HttpResponse<T> | StreamResponse<T>> {
@@ -94,8 +102,6 @@ export class HyperCore implements IHyperCore {
           return shortCircuit as HttpResponse<T>;
         }
       }
-
-      req.headers = normalizeHeaders(req.headers);
 
       const transport = this.transport || (await this.ensureTransport());
       let rawResponse = await transport.execute(req as TransportArgs);
@@ -123,6 +129,12 @@ export class HyperCore implements IHyperCore {
     }
   }
 
+  /**
+   * @ru Выполняет HTTP-запрос с полным контролем (через объект InternalRequest).
+   * @en Performs an HTTP request with full control (via InternalRequest object).
+   * @param req - Internal request object.
+   * @returns Promise with the HTTP response.
+   */
   public async dispatch<T = unknown>(
     req: InternalRequest,
   ): Promise<HttpResponse<T>> {
@@ -130,7 +142,10 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * Регистрация плагинов
+   * @ru Регистрирует плагин для расширения функциональности клиента.
+   * @en Registers a plugin to extend client functionality.
+   * @param plugin - Plugin instance.
+   * @returns This instance for chaining.
    */
   public use(plugin: HyperPlugin): this {
     const isEnabled = plugin.enabled ? plugin.enabled(this.config) : true;
@@ -180,7 +195,11 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * Публичные HTTP методы-помощники
+   * @ru Выполняет GET-запрос и возвращает ответ в виде потока (StreamResponse).
+   * @en Performs a GET request and returns the response as a stream (StreamResponse).
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the stream response.
    */
   public async stream(
     req: RequestInterface | string,
@@ -198,6 +217,14 @@ export class HyperCore implements IHyperCore {
     >;
   }
 
+  /**
+   * @ru Выполняет POST-запрос и возвращает ответ в виде потока (StreamResponse).
+   * @en Performs a POST request and returns the response as a stream (StreamResponse).
+   * @param req - Request URL or RequestInterface object.
+   * @param body - Request body data.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the stream response.
+   */
   public async postStream<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -208,6 +235,13 @@ export class HyperCore implements IHyperCore {
     return this.dispatchInternal(internalReq) as Promise<StreamResponse<T>>;
   }
 
+  /**
+   * @ru Выполняет GET-запрос.
+   * @en Performs a GET request.
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response.
+   */
   public get<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -217,6 +251,14 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет POST-запрос.
+   * @en Performs a POST request.
+   * @param req - Request URL or RequestInterface object.
+   * @param body - Request body data.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response.
+   */
   public post<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -227,6 +269,14 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет PUT-запрос.
+   * @en Performs a PUT request.
+   * @param req - Request URL or RequestInterface object.
+   * @param body - Request body data.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response.
+   */
   public put<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -237,6 +287,14 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет PATCH-запрос.
+   * @en Performs a PATCH request.
+   * @param req - Request URL or RequestInterface object.
+   * @param body - Request body data.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response.
+   */
   public patch<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -247,6 +305,13 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет DELETE-запрос.
+   * @en Performs a DELETE request.
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response.
+   */
   public delete<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -256,6 +321,14 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет OPTIONS-запрос.
+   * @en Performs an OPTIONS request.
+   * @param req - Request URL or RequestInterface object.
+   * @param body - Optional request body data.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response.
+   */
   public options<T = unknown>(
     req: RequestInterface | string,
     body?: RequestBodyData,
@@ -266,6 +339,13 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Выполняет HEAD-запрос.
+   * @en Performs a HEAD request.
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the HTTP response (body is always null).
+   */
   public head(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -275,6 +355,12 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Создаёт новый экземпляр HyperCore с расширенной конфигурацией (поверх текущей).
+   * @en Creates a new HyperCore instance with extended configuration (on top of current).
+   * @param options - Additional configuration options.
+   * @returns New HyperCore instance.
+   */
   public extend(options: Partial<HttpClientOptions>): HyperCore {
     return new HyperCore(
       {
@@ -286,14 +372,34 @@ export class HyperCore implements IHyperCore {
     );
   }
 
+  /**
+   * @ru Алиас для extend(). Создаёт новый экземпляр HyperCore.
+   * @en Alias for extend(). Creates a new HyperCore instance.
+   * @param options - Configuration options.
+   * @returns New HyperCore instance.
+   */
   public create(options: Partial<HttpClientOptions>): HyperCore {
     return this.extend(options);
   }
 
+  /**
+   * @ru Уничтожает клиент, закрывая соединения и очищая ресурсы.
+   * @en Destroys the client, closing connections and cleaning up resources.
+   * @param graceful - If true, attempts graceful shutdown (default: true).
+   * @returns Promise that resolves when destruction is complete.
+   */
   public async destroy(graceful = true): Promise<void> {
     await this.transportManager.destroy(graceful);
   }
 
+  /**
+   * @ru Выполняет запрос и сразу возвращает распарсенный JSON (сокращённый метод).
+   * @en Performs a request and immediately returns parsed JSON (shortcut method).
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the parsed JSON value.
+   * @throws If the response does not contain a json() method.
+   */
   public async json<T = unknown>(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -306,6 +412,14 @@ export class HyperCore implements IHyperCore {
     return res.json<T>();
   }
 
+  /**
+   * @ru Выполняет запрос и возвращает тело как строку (сокращённый метод).
+   * @en Performs a request and returns the body as a string (shortcut method).
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise with the response text.
+   * @throws If the response does not contain a text() method.
+   */
   public async text(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -318,6 +432,14 @@ export class HyperCore implements IHyperCore {
     return res.text();
   }
 
+  /**
+   * @ru Выполняет запрос и немедленно отменяет (сбрасывает) тело ответа без чтения.
+   * @en Performs a request and immediately discards the response body without reading.
+   * @param req - Request URL or RequestInterface object.
+   * @param signal - Optional abort signal.
+   * @returns Promise that resolves after dumping the response.
+   * @throws If the response does not contain a dump() method.
+   */
   public async dump(
     req: RequestInterface | string,
     signal?: AbortSignal,
@@ -329,10 +451,6 @@ export class HyperCore implements IHyperCore {
       );
     await res.dump();
   }
-
-  /**
-   * ПРИВАТНЫЕ МЕТОДЫ-ПОМОЩНИКИ (РЕФАКТОРИНГ)
-   */
 
   private async runResponsePipeline(
     response: HttpResponse | StreamResponse<unknown>,
@@ -353,9 +471,6 @@ export class HyperCore implements IHyperCore {
     }
   }
 
-  /**
-   * Изолированная обработка ошибок пайплайна ответа
-   */
   private async handleDispatchError<T>(
     error: Error,
     req: InternalRequest,
@@ -375,10 +490,7 @@ export class HyperCore implements IHyperCore {
     throw error;
   }
 
-  /**
-   * Применение встроенной декомпрессии на основе заголовков ответа транспорта
-   */
-  private applyDecompression(rawResponse: any): void {
+  private applyDecompression(rawResponse: Record<string, any>): void {
     if (!rawResponse.body) return;
 
     const encodingHeader =
@@ -405,9 +517,6 @@ export class HyperCore implements IHyperCore {
     }
   }
 
-  /**
-   * Сборка внутреннего объекта запроса InternalRequest
-   */
   private buildInternalRequest(
     method: Method,
     req: RequestInterface | string,
@@ -478,9 +587,6 @@ export class HyperCore implements IHyperCore {
     });
   }
 
-  /**
-   * Фабрика сохранения прототипа исходного запроса с подменой дескрипторов базовых свойств
-   */
   private createInternalRequestObject(
     sourceReq: Record<string, unknown>,
     overrides: Record<string, unknown>,
@@ -489,38 +595,39 @@ export class HyperCore implements IHyperCore {
     const target =
       proto && proto !== Object.prototype ? Object.create(proto) : {};
 
-    Object.defineProperties(
-      target,
-      Object.getOwnPropertyDescriptors(sourceReq),
-    );
-
-    const propertyDescriptors: PropertyDescriptorMap = {};
-    for (const [key, value] of Object.entries(overrides)) {
-      propertyDescriptors[key] = {
-        value,
-        enumerable: true,
-        writable: true,
-        configurable: true,
-      };
+    for (const key in sourceReq) {
+      if (Object.prototype.hasOwnProperty.call(sourceReq, key)) {
+        target[key] = sourceReq[key];
+      }
     }
 
-    Object.defineProperties(target, propertyDescriptors);
+    for (const key in overrides) {
+      if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+        target[key] = overrides[key];
+      }
+    }
+
     return target as InternalRequest;
   }
 
   private appendQueryParams(url: URL, query?: Record<string, unknown>): void {
     if (!query) return;
 
-    for (const [key, value] of Object.entries(query)) {
-      if (value === undefined || value === null) continue;
+    for (const key in query) {
+      if (Object.prototype.hasOwnProperty.call(query, key)) {
+        const value = query[key];
+        if (value === undefined || value === null) continue;
 
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          if (item === undefined || item === null) continue;
-          url.searchParams.append(key, String(item));
+        if (Array.isArray(value)) {
+          const len = value.length;
+          for (let i = 0; i < len; i++) {
+            const item = value[i];
+            if (item === undefined || item === null) continue;
+            url.searchParams.append(key, String(item));
+          }
+        } else {
+          url.searchParams.set(key, String(value));
         }
-      } else {
-        url.searchParams.set(key, String(value));
       }
     }
   }
