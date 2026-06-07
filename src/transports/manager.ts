@@ -60,14 +60,8 @@ const CANDIDATES_MAP: Record<Runtime, TransportDef[]> = {
   ),
 };
 
-/**
- * FIX: pkg-level cache (correct fallback behavior)
- */
 const CACHE: Map<string, TransportCtor> = new Map();
 
-/**
- * optional debug mode
- */
 const DEBUG = false;
 const trace = (...args: unknown[]) => {
   if (DEBUG) console.log("[hyperttp]", ...args);
@@ -86,11 +80,7 @@ function isModuleNotFoundError(err: unknown): boolean {
   );
 }
 
-/**
- * deterministic resolver (NO cwd priority abuse)
- */
 async function resolveModule(pkg: string): Promise<string | null> {
-  // 1. relative
   if (pkg.startsWith(".")) {
     try {
       return import.meta.resolve(pkg, import.meta.url);
@@ -99,14 +89,12 @@ async function resolveModule(pkg: string): Promise<string | null> {
     }
   }
 
-  // 2. ESM first
   try {
     return import.meta.resolve(pkg, import.meta.url);
   } catch {
-    // ignore
+    //
   }
 
-  // 3. Node fallback (only if needed)
   const physical = resolveFrom.silent(process.cwd(), pkg);
   if (physical) return pathToFileURL(physical).href;
 
@@ -137,7 +125,11 @@ async function loadCtor(
 }
 
 /**
- * main resolver (now DIAGNOSTIC + deterministic)
+ * @ru Главный резолвер транспорта (диагностический и детерминированный).
+ * @en Main transport resolver (diagnostic and deterministic).
+ * @param config - Client configuration (may contain customTransport).
+ * @returns Promise resolving to a HyperTransport instance.
+ * @throws If no compatible transport can be loaded.
  */
 export async function resolveTransport(
   config: HttpClientOptions,
@@ -195,11 +187,21 @@ export interface TransportDebugInfo {
   runtime: Runtime;
 }
 
+/**
+ * @ru Управляет жизненным циклом транспортного слоя: ленивая инициализация, кеширование, синхронизация конфигурации.
+ * @en Manages the transport layer lifecycle: lazy initialization, caching, configuration synchronization.
+ */
 export class TransportManager {
   private transport: HyperTransport | null = null;
   private promise: Promise<HyperTransport> | null = null;
   private config: HttpClientOptions;
 
+  /**
+   * @ru Создаёт менеджер транспорта.
+   * @en Creates a transport manager.
+   * @param config - Client configuration.
+   * @param custom - Optional externally provided transport instance.
+   */
   constructor(config: HttpClientOptions, custom?: HyperTransport) {
     this.config = config;
 
@@ -209,14 +211,28 @@ export class TransportManager {
     }
   }
 
+  /**
+   * @ru Обновляет конфигурацию клиента.
+   * @en Updates the client configuration.
+   * @param config - New configuration.
+   */
   setConfig(config: HttpClientOptions) {
     this.config = config;
   }
 
+  /**
+   * @ru Возвращает текущий экземпляр транспорта (если уже инициализирован).
+   * @en Returns the current transport instance (if already initialised).
+   */
   get instance() {
     return this.transport;
   }
 
+  /**
+   * @ru Асинхронно получает экземпляр транспорта (инициализирует при необходимости).
+   * @en Asynchronously obtains a transport instance (initialises if needed).
+   * @returns Promise resolving to a HyperTransport.
+   */
   async get(): Promise<HyperTransport> {
     if (this.transport) return this.transport;
     if (this.promise) return this.promise;
@@ -229,6 +245,12 @@ export class TransportManager {
     return this.promise;
   }
 
+  /**
+   * @ru Выполняет запрос через транспорт и возвращает обычный (не стриминговый) ответ.
+   * @en Executes a request through the transport and returns a regular (non‑streaming) response.
+   * @param req - Request parameters.
+   * @returns Promise resolving to HttpResponse.
+   */
   async execute<T = unknown>(
     req: Parameters<HyperTransport["execute"]>[0],
   ): Promise<HttpResponse<T>> {
@@ -236,6 +258,12 @@ export class TransportManager {
     return mapResponseFast(await t.execute(req)) as HttpResponse<T>;
   }
 
+  /**
+   * @ru Выполняет запрос через транспорт и возвращает стриминговый ответ.
+   * @en Executes a request through the transport and returns a streaming response.
+   * @param req - Request parameters.
+   * @returns Promise resolving to StreamResponse.
+   */
   async executeStream<T = unknown>(
     req: Parameters<HyperTransport["execute"]>[0],
   ): Promise<StreamResponse<T>> {
@@ -243,6 +271,10 @@ export class TransportManager {
     return mapStreamFast(await t.execute(req)) as StreamResponse<T>;
   }
 
+  /**
+   * @ru Возвращает отладочную информацию о текущем транспорте.
+   * @en Returns debug information about the current transport.
+   */
   public get debug(): TransportDebugInfo | null {
     const t = this.transport as any;
     if (!t) return null;
@@ -254,6 +286,12 @@ export class TransportManager {
     };
   }
 
+  /**
+   * @ru Завершает работу транспорта (закрывает соединения при graceful shutdown, иначе принудительно уничтожает).
+   * @en Shuts down the transport (gracefully closes connections or forcefully destroys).
+   * @param graceful - If true, attempt graceful close; otherwise call destroy.
+   * @returns Promise that resolves when shutdown is complete.
+   */
   async destroy(graceful = true): Promise<void> {
     const t = this.transport;
     if (!t) return;

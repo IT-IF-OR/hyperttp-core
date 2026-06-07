@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "High-performance, extensible HTTP client for Node.js and Bun and other",
   "type": "module",
   "main": "./dist/index.js",
