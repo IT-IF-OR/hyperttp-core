@@ -9,24 +9,24 @@ export function deepMerge<
   T extends Record<string, unknown>,
   S extends Record<string, unknown>,
 >(target: T, source: S): T & S {
-  const output = { ...target } as Record<string, unknown>;
+  const output: Record<string, unknown> = { ...target };
 
-  if (isObject(target) && isObject(source)) {
-    for (const key in source) {
-      if (Object.prototype.hasOwnProperty.call(source, key)) {
-        const sourceValue = source[key];
-        const targetValue = output[key];
+  for (const key of Object.keys(source)) {
+    const sourceValue = source[key];
+    const targetValue = output[key];
 
-        if (isObject(sourceValue)) {
-          if (key in output && isObject(targetValue)) {
-            output[key] = deepMerge(targetValue, sourceValue);
-          } else {
-            output[key] = deepMerge({}, sourceValue);
-          }
-        } else if (sourceValue !== undefined) {
-          output[key] = sourceValue;
-        }
-      }
+    if (isObject(sourceValue) && isObject(targetValue)) {
+      output[key] = deepMerge(
+        targetValue as Record<string, unknown>,
+        sourceValue as Record<string, unknown>,
+      );
+      continue;
+    }
+
+    if (sourceValue !== undefined) {
+      output[key] = isObject(sourceValue)
+        ? deepMerge({}, sourceValue as Record<string, unknown>)
+        : sourceValue;
     }
   }
 
@@ -39,5 +39,5 @@ export function deepMerge<
  * @param item - Evaluated runtime variable value context.
  */
 function isObject(item: unknown): item is Record<string, unknown> {
-  return typeof item === "object" && item !== null && !Array.isArray(item);
+  return Object.prototype.toString.call(item) === "[object Object]";
 }
