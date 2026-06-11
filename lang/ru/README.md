@@ -385,5 +385,5 @@ MIT
 ---
 
 <p align="center">
-  Сделано с ❤️ <a href="https://github.com/dirold2">dirold2</a>
+  <a href="https://github.com/dirold2">dirold2</a>
 </p>
