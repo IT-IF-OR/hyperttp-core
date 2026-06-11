@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "High-performance, extensible HTTP client for Node.js, Bun, Deno and Browser",
   "type": "module",
   "sideEffects": false,
