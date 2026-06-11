@@ -6,12 +6,6 @@ export class HttpClientError extends Error {
   /**
    * @ru Создает новый экземпляр HttpClientError.
    * @en Creates a new HttpClientError instance.
-   * @param message - Human-readable error message text.
-   * @param code - Internal stringified error state identifier code.
-   * @param statusCode - Numerical HTTP response status code received from the server.
-   * @param originalError - Raw captured exception instance causing this failure.
-   * @param url - Targeted request URL destination string.
-   * @param method - HTTP method verb utilized for the request.
    */
   constructor(
     message: string,
@@ -21,7 +15,7 @@ export class HttpClientError extends Error {
     public url?: string,
     public method?: string,
   ) {
-    super(message);
+    super(message, originalError ? { cause: originalError } : undefined);
     this.name = "HttpClientError";
   }
 }
@@ -34,8 +28,6 @@ export class TimeoutError extends HttpClientError {
   /**
    * @ru Создает новый экземпляр TimeoutError.
    * @en Creates a new TimeoutError instance.
-   * @param url - Targeted request URL destination string.
-   * @param timeout - Threshold duration statement in milliseconds.
    */
   constructor(url: string, timeout: number) {
     super(`Timeout after ${timeout}ms`, "TIMEOUT", 408, undefined, url);
@@ -51,8 +43,6 @@ export class RateLimitError extends HttpClientError {
   /**
    * @ru Создает новый экземпляр RateLimitError.
    * @en Creates a new RateLimitError instance.
-   * @param url - Targeted request URL destination string.
-   * @param retryAfter - Optional cool-down period duration in milliseconds before the next retry attempt.
    */
   constructor(url: string, retryAfter?: number) {
     super(

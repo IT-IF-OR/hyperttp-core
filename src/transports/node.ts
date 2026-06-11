@@ -1,8 +1,3 @@
-/**
- * @ru Транспорт на основе глобального fetch (Node.js 18+). Обрабатывает нормализацию URL, сериализацию тела и очистку потока.
- * @en Transport based on the global fetch API (Node.js 18+). Handles URL normalisation, body serialisation, and stream cleanup.
- */
-
 import type {
   HttpClientOptions,
   HyperTransport,
@@ -15,25 +10,127 @@ export interface NodeTransportConfig extends HttpClientOptions {
   baseUrl?: string;
 }
 
+const fetchFn: typeof globalThis.fetch = globalThis.fetch;
+
+function installReadableStreamDump(): void {
+  if (typeof ReadableStream === "undefined") return;
+
+  const proto = ReadableStream.prototype as ReadableStream & {
+    dump?: () => Promise<void>;
+  };
+
+  if (typeof proto.dump === "function") return;
+
+  Object.defineProperty(proto, "dump", {
+    value: async function () {
+      try {
+        return await this.cancel();
+      } catch {
+        //
+      }
+    },
+    writable: true,
+    configurable: true,
+  });
+}
+
+installReadableStreamDump();
+
+function isAbsoluteHttpUrl(url: string): boolean {
+  return url.startsWith("http://") || url.startsWith("https://");
+}
+
+function resolveUrl(baseUrl: string, url: string): string {
+  if (isAbsoluteHttpUrl(url)) return url;
+  return url.charCodeAt(0) === 47 ? baseUrl + url : baseUrl + "/" + url;
+}
+
+function isLocalhostUrl(url: string): boolean {
+  const schemeIdx = url.indexOf("://");
+  if (schemeIdx === -1) return false;
+
+  const hostStart = schemeIdx + 3;
+  let hostEnd = url.indexOf("/", hostStart);
+  if (hostEnd === -1) hostEnd = url.length;
+
+  const host = url.slice(hostStart, hostEnd);
+  return host === "localhost" || host.startsWith("localhost:");
+}
+
+function normalizeHeaders(
+  headers: TransportRequest["headers"],
+): Record<string, string> | undefined {
+  if (!headers) return undefined;
+
+  if (headers instanceof Headers) {
+    const out: Record<string, string> = Object.create(null);
+    headers.forEach((value, key) => {
+      out[key] = value;
+    });
+    return out;
+  }
+
+  if (Array.isArray(headers)) {
+    const out: Record<string, string> = Object.create(null);
+    for (let i = 0; i < headers.length; i++) {
+      const pair = headers[i] as unknown as [string, string] | undefined;
+      if (!pair) continue;
+      out[pair[0]] = pair[1];
+    }
+    return out;
+  }
+
+  const out: Record<string, string> = Object.create(null);
+  const src = headers as Record<string, unknown>;
+
+  for (const key in src) {
+    const value = src[key];
+    if (value == null) continue;
+
+    if (Array.isArray(value)) {
+      out[key] = key.toLowerCase() === "cookie" ? value.join("; ") : value.join(", ");
+      continue;
+    }
+
+    out[key] = String(value);
+  }
+
+  return out;
+}
+
+function normalizeBody(body: TransportRequest["body"]): BodyInit | undefined {
+  if (body === undefined || body === null) return undefined;
+
+  if (
+    typeof body === "string" ||
+    body instanceof Uint8Array ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body) ||
+    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) ||
+    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
+    (typeof FormData !== "undefined" && body instanceof FormData) ||
+    (typeof Blob !== "undefined" && body instanceof Blob)
+  ) {
+    return body as BodyInit;
+  }
+
+  if (typeof body === "object") {
+    return JSON.stringify(body);
+  }
+
+  return String(body);
+}
+
 /**
  * @ru Реализация транспорта для Node.js с использованием fetch.
  * @en Node.js transport implementation using fetch.
  */
 export class NodeTransport implements HyperTransport {
-  /**
-   * @ru Конфигурация клиента.
-   * @en Client configuration.
-   */
   public config: NodeTransportConfig;
 
   private readonly isProduction: boolean;
   private readonly cleanBaseUrl: string;
 
-  /**
-   * @ru Создаёт экземпляр NodeTransport.
-   * @en Creates a NodeTransport instance.
-   * @param config - Transport configuration (may include baseUrl).
-   */
   constructor(config: NodeTransportConfig) {
     this.config = config;
     this.isProduction = process.env.NODE_ENV === "production";
@@ -42,62 +139,35 @@ export class NodeTransport implements HyperTransport {
     this.cleanBaseUrl = base.endsWith("/") ? base.slice(0, -1) : base;
   }
 
-  /**
-   * @ru Выполняет HTTP-запрос через fetch.
-   * @en Executes an HTTP request via fetch.
-   * @param req - Transport request object (method, url, headers, body, signal).
-   * @returns Promise resolving to a TransportResponse.
-   * @throws If a localhost URL is requested in production environment.
-   */
   public async execute(req: TransportRequest): Promise<TransportResponse> {
-    const urlStr = req.url;
+    const fullUrl = resolveUrl(this.cleanBaseUrl, req.url);
 
-    const fullUrl = urlStr.startsWith("http")
-      ? urlStr
-      : urlStr.charCodeAt(0) === 47
-        ? this.cleanBaseUrl + urlStr
-        : this.cleanBaseUrl + "/" + urlStr;
-
-    if (this.isProduction && fullUrl.includes("//localhost")) {
+    if (this.isProduction && isLocalhostUrl(fullUrl)) {
       throw new Error("Localhost URL detected in production environment");
     }
 
-    let finalBody: any = req.body;
-    if (
-      finalBody !== undefined &&
-      finalBody !== null &&
-      typeof finalBody === "object" &&
-      !Buffer.isBuffer(finalBody) &&
-      !(finalBody instanceof ReadableStream)
-    ) {
-      finalBody = JSON.stringify(finalBody);
-    }
+    const headers = normalizeHeaders(req.headers);
+    const body = normalizeBody(req.body);
 
-    const res = await globalThis.fetch(fullUrl, {
+    const res = await fetchFn(fullUrl, {
       method: req.method,
-      headers: req.headers as Record<string, string>,
-      body: finalBody,
+      headers,
+      body,
       signal: req.signal,
     });
 
-    const webStream = res.body || new ReadableStream();
+    const stream = (res.body ?? new ReadableStream()) as TransportResponsePayload;
 
-    (webStream as any).dump = async function () {
-      if (res.body && !res.body.locked) {
-        await res.body.cancel();
-      }
-    };
-
-    const resHeaders: Record<string, string> = {};
-    for (const [key, value] of res.headers) {
+    const resHeaders: Record<string, string> = Object.create(null);
+    res.headers.forEach((value, key) => {
       resHeaders[key] = value;
-    }
+    });
 
     return {
       status: res.status,
       headers: resHeaders,
       url: res.url,
-      body: webStream as unknown as TransportResponsePayload,
+      body: stream,
     };
   }
 }

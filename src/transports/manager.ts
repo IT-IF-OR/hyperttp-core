@@ -1,15 +1,6 @@
-import { pathToFileURL } from "node:url";
-import resolveFrom from "resolve-from";
-import type {
-  HttpClientOptions,
-  HyperTransport,
-  HttpResponse,
-  StreamResponse,
-  HyperttpError,
-} from "@hyperttp/types";
-import { mapResponseFast, mapStreamFast } from "../utils/response.js";
+import type { HttpClientOptions, HyperTransport } from "@hyperttp/types";
 
-export type Runtime = "bun" | "node";
+export type Runtime = "bun" | "node" | "deno" | "browser";
 type TransportCtor = new (config: HttpClientOptions) => HyperTransport;
 
 type TransportDef = {
@@ -20,12 +11,12 @@ type TransportDef = {
   priority: number;
 };
 
-export const CURRENT_RUNTIME: Runtime =
-  typeof Bun !== "undefined" ? "bun" : "node";
-
-export function getRuntime(): Runtime {
-  return CURRENT_RUNTIME;
-}
+export const CURRENT_RUNTIME: Runtime = (() => {
+  if (typeof Bun !== "undefined") return "bun";
+  if (typeof Deno !== "undefined") return "deno";
+  if (typeof process !== "undefined" && process.versions?.node) return "node";
+  return "browser";
+})();
 
 export const TRANSPORTS: TransportDef[] = [
   {
@@ -36,6 +27,13 @@ export const TRANSPORTS: TransportDef[] = [
     priority: 100,
   },
   {
+    name: "Deno",
+    runtime: ["deno"],
+    pkg: "@hyperttp/transport-deno",
+    export: "DenoTransport",
+    priority: 95,
+  },
+  {
     name: "Undici",
     runtime: ["node"],
     pkg: "@hyperttp/transport-undici",
@@ -43,266 +41,209 @@ export const TRANSPORTS: TransportDef[] = [
     priority: 90,
   },
   {
+    name: "Browser",
+    runtime: ["browser"],
+    pkg: "../transports/browser.js",
+    export: "BrowserTransport",
+    priority: 80,
+  },
+  {
     name: "Node",
-    runtime: ["node", "bun"],
+    runtime: ["node", "bun", "deno"],
     pkg: "../transports/node.js",
     export: "NodeTransport",
     priority: 10,
   },
 ];
 
-const CANDIDATES_MAP: Record<Runtime, TransportDef[]> = {
-  node: TRANSPORTS.filter((t) => t.runtime.includes("node")).sort(
-    (a, b) => b.priority - a.priority,
-  ),
-  bun: TRANSPORTS.filter((t) => t.runtime.includes("bun")).sort(
-    (a, b) => b.priority - a.priority,
-  ),
-};
+const CANDIDATES = TRANSPORTS.filter((t) => t.runtime.includes(CURRENT_RUNTIME)).sort(
+  (a, b) => b.priority - a.priority,
+);
 
-const CACHE: Map<string, TransportCtor> = new Map();
+let RESOLVED_RUNTIME_CTOR: TransportCtor | null = null;
+let NODE_RESOLVE_TOOLS: [any, any] | null = null;
+let ATTEMPTED_TOOLS_LOAD = false;
 
-const DEBUG = false;
-const trace = (...args: unknown[]) => {
-  if (DEBUG) console.log("[hyperttp]", ...args);
-};
+export const runtimeImport = Function("s", "return import(s)") as <T = any>(
+  specifier: string,
+) => Promise<T>;
 
 function isModuleNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
-
-  const e = err as HyperttpError;
+  const code = (err as any).code;
+  if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true;
   const msg = err instanceof Error ? err.message : "";
-
   return (
-    e.code === "ERR_MODULE_NOT_FOUND" ||
     msg.includes("Cannot find module") ||
-    msg.includes("Failed to resolve")
+    msg.includes("Failed to resolve") ||
+    msg.includes("Failed to load")
   );
 }
 
-async function resolveModule(pkg: string): Promise<string | null> {
-  if (pkg.startsWith(".")) {
-    try {
-      return import.meta.resolve(pkg, import.meta.url);
-    } catch {
-      return null;
-    }
-  }
-
+async function resolveExternalModule(pkg: string): Promise<string | null> {
   try {
-    return import.meta.resolve(pkg, import.meta.url);
+    if (typeof import.meta.resolve === "function") {
+      return import.meta.resolve(pkg, import.meta.url);
+    }
   } catch {
     //
   }
 
-  const physical = resolveFrom.silent(process.cwd(), pkg);
-  if (physical) return pathToFileURL(physical).href;
+  if (CURRENT_RUNTIME !== "browser") {
+    try {
+      if (!NODE_RESOLVE_TOOLS && !ATTEMPTED_TOOLS_LOAD) {
+        ATTEMPTED_TOOLS_LOAD = true;
+        NODE_RESOLVE_TOOLS = await Promise.all([
+          runtimeImport("resolve-from").catch(() => null),
+          runtimeImport("node:url").catch(() => null),
+        ]);
+      }
 
+      if (!NODE_RESOLVE_TOOLS || !NODE_RESOLVE_TOOLS[0] || !NODE_RESOLVE_TOOLS[1]) return null;
+
+      const resolveFrom = NODE_RESOLVE_TOOLS[0].default ?? NODE_RESOLVE_TOOLS[0];
+      const url = NODE_RESOLVE_TOOLS[1].default ?? NODE_RESOLVE_TOOLS[1];
+
+      let cwd = ".";
+      try {
+        cwd = process.cwd();
+      } catch {
+        //
+      }
+
+      const physicalPath = resolveFrom.silent?.(cwd, pkg) ?? resolveFrom(cwd, pkg);
+      if (physicalPath) {
+        return url.pathToFileURL(physicalPath).href;
+      }
+    } catch {
+      //
+    }
+  }
   return null;
 }
 
-async function loadCtor(
-  pkg: string,
-  exportName: string,
-): Promise<TransportCtor | null> {
-  const resolved = await resolveModule(pkg);
-
-  if (!resolved) {
-    trace("resolve failed:", pkg);
-    return null;
+async function loadCtor(pkg: string, exportName: string): Promise<TransportCtor | null> {
+  if (CURRENT_RUNTIME === "browser") {
+    if (pkg !== "../transports/browser.js") return null;
+    const mod = (await import("../transports/browser.js")) as any;
+    const candidate = mod[exportName] ?? mod.default;
+    return typeof candidate === "function" ? candidate : null;
   }
 
-  const mod = (await import(resolved)) as Record<string, unknown>;
-
-  const candidate = mod[exportName] ?? mod.default;
-
-  if (typeof candidate !== "function") {
-    trace("invalid export:", pkg, exportName);
-    return null;
+  let specifier = pkg;
+  if (pkg[0] === "." || pkg[0] === "/") {
+    try {
+      specifier = import.meta.resolve(pkg, import.meta.url);
+    } catch {
+      //
+    }
+  } else {
+    const resolved = await resolveExternalModule(pkg);
+    if (resolved) specifier = resolved;
   }
 
-  return candidate as TransportCtor;
+  try {
+    const mod = await runtimeImport<Record<string, unknown>>(specifier);
+    const candidate = mod[exportName] ?? mod.default;
+    return typeof candidate === "function" ? (candidate as TransportCtor) : null;
+  } catch (err) {
+    if (isModuleNotFoundError(err)) return null;
+    throw err;
+  }
 }
 
-/**
- * @ru Главный резолвер транспорта (диагностический и детерминированный).
- * @en Main transport resolver (diagnostic and deterministic).
- * @param config - Client configuration (may contain customTransport).
- * @returns Promise resolving to a HyperTransport instance.
- * @throws If no compatible transport can be loaded.
- */
-export async function resolveTransport(
-  config: HttpClientOptions,
-): Promise<HyperTransport> {
+export async function resolveTransport(config: HttpClientOptions): Promise<HyperTransport> {
   if (config.customTransport) return config.customTransport;
-
-  const runtime = CURRENT_RUNTIME;
-  const candidates = CANDIDATES_MAP[runtime];
+  if (RESOLVED_RUNTIME_CTOR) return new RESOLVED_RUNTIME_CTOR(config);
 
   const failures: string[] = [];
 
-  for (const t of candidates) {
-    trace("trying:", t.pkg);
-
+  for (let i = 0; i < CANDIDATES.length; i++) {
+    const t = CANDIDATES[i]!;
     try {
-      const cached = CACHE.get(t.pkg);
-      if (cached) {
-        trace("cache hit:", t.pkg);
-        return new cached(config);
-      }
-
       const ctor = await loadCtor(t.pkg, t.export);
-
       if (!ctor) {
-        failures.push(`${t.pkg} (no export: ${t.export})`);
+        failures.push(`${t.pkg} (missing export or not installed)`);
         continue;
       }
 
-      CACHE.set(t.pkg, ctor);
-      trace("selected:", t.pkg);
-
+      RESOLVED_RUNTIME_CTOR = ctor;
       return new ctor(config);
     } catch (err) {
       if (isModuleNotFoundError(err)) {
         failures.push(`${t.pkg} (not installed)`);
         continue;
       }
-
-      throw new Error(
-        `[Hyperttp] transport crash in ${t.pkg}: ${(err as Error)?.message}`,
-        { cause: err },
-      );
+      throw new Error(`[Hyperttp] transport crash in ${t.pkg}: ${(err as Error)?.message}`, {
+        cause: err,
+      });
     }
   }
 
   throw new Error(
-    `No compatible transport for runtime="${runtime}".\n` +
-      `Failures:\n- ${failures.join("\n- ")}`,
+    `No compatible transport for runtime="${CURRENT_RUNTIME}".\nFailures:\n- ${failures.join("\n- ")}`,
   );
 }
 
-export interface TransportDebugInfo {
-  name: string;
-  pkg: string;
-  runtime: Runtime;
-}
-
-/**
- * @ru Управляет жизненным циклом транспортного слоя: ленивая инициализация, кеширование, синхронизация конфигурации.
- * @en Manages the transport layer lifecycle: lazy initialization, caching, configuration synchronization.
- */
 export class TransportManager {
-  private transport: HyperTransport | null = null;
+  public transport: HyperTransport | null = null;
   private promise: Promise<HyperTransport> | null = null;
   private config: HttpClientOptions;
 
-  /**
-   * @ru Создаёт менеджер транспорта.
-   * @en Creates a transport manager.
-   * @param config - Client configuration.
-   * @param custom - Optional externally provided transport instance.
-   */
   constructor(config: HttpClientOptions, custom?: HyperTransport) {
     this.config = config;
 
     if (custom) {
       this.transport = custom;
-      this.promise = Promise.resolve(custom);
+    } else if (config.customTransport) {
+      this.transport = config.customTransport;
+    } else if (RESOLVED_RUNTIME_CTOR) {
+      this.transport = new RESOLVED_RUNTIME_CTOR(config);
     }
   }
 
-  /**
-   * @ru Обновляет конфигурацию клиента.
-   * @en Updates the client configuration.
-   * @param config - New configuration.
-   */
-  setConfig(config: HttpClientOptions) {
-    this.config = config;
-  }
-
-  /**
-   * @ru Возвращает текущий экземпляр транспорта (если уже инициализирован).
-   * @en Returns the current transport instance (if already initialised).
-   */
-  get instance() {
+  public getSync(): HyperTransport | null {
     return this.transport;
   }
 
-  /**
-   * @ru Асинхронно получает экземпляр транспорта (инициализирует при необходимости).
-   * @en Asynchronously obtains a transport instance (initialises if needed).
-   * @returns Promise resolving to a HyperTransport.
-   */
-  async get(): Promise<HyperTransport> {
-    if (this.transport) return this.transport;
-    if (this.promise) return this.promise;
+  public ensure(): Promise<HyperTransport> {
+    if (this.transport !== null) {
+      return this.promise || (this.promise = Promise.resolve(this.transport));
+    }
+    if (this.promise !== null) return this.promise;
 
-    this.promise = resolveTransport(this.config).then((t) => {
+    return (this.promise = resolveTransport(this.config).then((t) => {
       this.transport = t;
       return t;
-    });
-
-    return this.promise;
+    }));
   }
 
-  /**
-   * @ru Выполняет запрос через транспорт и возвращает обычный (не стриминговый) ответ.
-   * @en Executes a request through the transport and returns a regular (non‑streaming) response.
-   * @param req - Request parameters.
-   * @returns Promise resolving to HttpResponse.
-   */
-  async execute<T = unknown>(
-    req: Parameters<HyperTransport["execute"]>[0],
-  ): Promise<HttpResponse<T>> {
-    const t = this.transport || (await this.get());
-    return mapResponseFast(await t.execute(req)) as HttpResponse<T>;
+  public get(): HyperTransport | Promise<HyperTransport> {
+    return this.transport ?? this.ensure();
   }
 
-  /**
-   * @ru Выполняет запрос через транспорт и возвращает стриминговый ответ.
-   * @en Executes a request through the transport and returns a streaming response.
-   * @param req - Request parameters.
-   * @returns Promise resolving to StreamResponse.
-   */
-  async executeStream<T = unknown>(
-    req: Parameters<HyperTransport["execute"]>[0],
-  ): Promise<StreamResponse<T>> {
-    const t = this.transport || (await this.get());
-    return mapStreamFast(await t.execute(req)) as StreamResponse<T>;
+  public setConfig(config: HttpClientOptions): void {
+    this.config = config;
+    if (this.transport && typeof (this.transport as any).setConfig === "function") {
+      (this.transport as any).setConfig(config);
+    }
   }
 
-  /**
-   * @ru Возвращает отладочную информацию о текущем транспорте.
-   * @en Returns debug information about the current transport.
-   */
-  public get debug(): TransportDebugInfo | null {
-    const t = this.transport as any;
-    if (!t) return null;
-
-    return {
-      name: t.__name ?? t.constructor?.name,
-      pkg: t.__pkg ?? "unknown",
-      runtime: getRuntime(),
-    };
-  }
-
-  /**
-   * @ru Завершает работу транспорта (закрывает соединения при graceful shutdown, иначе принудительно уничтожает).
-   * @en Shuts down the transport (gracefully closes connections or forcefully destroys).
-   * @param graceful - If true, attempt graceful close; otherwise call destroy.
-   * @returns Promise that resolves when shutdown is complete.
-   */
-  async destroy(graceful = true): Promise<void> {
+  public async destroy(graceful = true): Promise<void> {
     const t = this.transport;
     if (!t) return;
 
-    if (graceful && typeof t.close === "function") {
-      await t.close();
-      return;
-    }
-
-    if (typeof t.destroy === "function") {
-      await t.destroy();
+    try {
+      if (graceful && typeof t.close === "function") {
+        await t.close();
+        return;
+      }
+      if (typeof t.destroy === "function") {
+        await t.destroy();
+      }
+    } finally {
+      this.transport = null;
+      this.promise = null;
     }
   }
 }

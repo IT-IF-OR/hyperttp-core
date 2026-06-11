@@ -27,28 +27,18 @@ import { normalizeBody, normalizeHeaders, normalizeUrl } from "../utils/normaliz
 
 type TransportArgs = Parameters<HyperTransport["execute"]>[0];
 
-/**
- * @ru Глобальный кэш URL для избежания повторного парсинга через `new URL()`.
- * Использует `Object.create(null)` для быстрого доступа без прототипа.
- * @en Global URL cache to avoid repeated parsing via `new URL()`.
- * Uses `Object.create(null)` for fast prototype-less access.
- */
 const urlCache: Record<string, string> = Object.create(null);
 let urlCacheCount = 0;
 const MAX_CACHE_SIZE = 512;
 
-/**
- * @ru Пул переиспользуемых объектов InternalRequest для zero-allocation в горячем пути.
- * @en Pool of reusable InternalRequest objects for zero-allocation in the hot path.
- */
 const requestPool: InternalRequest[] = [];
 const MAX_POOL_SIZE = 64;
 
 /**
- * @ru Ядро HTTP-клиента Hyperttp. Обеспечивает диспетчеризацию запросов через
- * конвейер плагинов, пулинг объектов запросов и кэширование URL.
- * @en Hyperttp HTTP client core. Provides request dispatching through the
- * plugin pipeline, request object pooling, and URL caching.
+ * @ru Основной класс HTTP-клиента Hyperttp. Обеспечивает диспетчеризацию запросов,
+ * управление плагинами, пулинг объектов запросов и кэширование URL.
+ * @en Core HTTP client class for Hyperttp. Provides request dispatching,
+ * plugin management, request object pooling, and URL caching.
  */
 export class HyperCore implements IHyperCore {
   public config: HttpClientOptions;
@@ -64,8 +54,8 @@ export class HyperCore implements IHyperCore {
   private hasErrorPlugins = false;
 
   /**
-   * @ru Создаёт новый экземпляр ядра HTTP-клиента.
-   * @en Creates a new HTTP client core instance.
+   * @ru Создаёт новый экземпляр HTTP-клиента.
+   * @en Creates a new HTTP client instance.
    * @param config - Client configuration options.
    * @param transport - Optional custom transport implementation.
    */
@@ -591,7 +581,7 @@ export class HyperCore implements IHyperCore {
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<HttpResponse<unknown>> {
-    const method = typeof req === "string" ? "GET" : (req.method ?? "GET");
+    const method = typeof req === "string" ? "GET" : (((req as any).method as Method) ?? "GET");
     return this.dispatch(this.acquireReq(method, req, undefined, signal));
   }
 }

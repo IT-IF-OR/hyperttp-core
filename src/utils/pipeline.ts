@@ -33,9 +33,7 @@ export interface PipelineContainer {
   /** @ru Хуки, мутирующие ответ (последовательное выполнение). @en Hooks that mutate the response (sequential execution). */
   readonly responseMutators: HookRecord<Required<HyperPlugin>["onResponse"]>[];
   /** @ru Хуки с побочными эффектами (выполняются в фоне). @en Side-effect hooks (executed in the background). */
-  readonly responseSideEffects: HookRecord<
-    Required<HyperPlugin>["onResponse"]
-  >[];
+  readonly responseSideEffects: HookRecord<Required<HyperPlugin>["onResponse"]>[];
   /** @ru Хуки для перехвата ошибок. @en Error interception hooks. */
   readonly error: HookRecord<Required<HyperPlugin>["onError"]>[];
 }
@@ -61,10 +59,7 @@ export function createPipelines(): PipelineContainer {
  * @param list - Target array to insert into.
  * @param hook - Hook record to insert.
  */
-export function insertHookSorted<T>(
-  list: HookRecord<T>[],
-  hook: HookRecord<T>,
-): void {
+export function insertHookSorted<T>(list: HookRecord<T>[], hook: HookRecord<T>): void {
   const len = list.length;
   let i = 0;
   while (i < len && list[i]!.priority >= hook.priority) {
@@ -74,40 +69,29 @@ export function insertHookSorted<T>(
 }
 
 /**
- * @ru Выполняет конвейер пред-запроса. Поддерживает short-circuit (ранний возврат ответа). Использует Fast-Path для синхронных хуков без аллокации микротасок.
- * @en Executes the pre-request pipeline. Supports short-circuiting with fast-path for sync hooks.
- * @param hooks - Array of request hooks.
- * @param req - Internal request object.
- * @param ctx - Plugin context.
- * @returns A response if short-circuited, null otherwise, or a promise.
+ * @ru Выполняет конвейер пред-запроса. Поддерживает short-circuit.
+ * @en Executes the pre-request pipeline. Supports short-circuiting.
  */
 export function executeRequestPipeline(
   hooks: readonly HookRecord<Required<HyperPlugin>["onRequest"]>[],
   req: InternalRequest,
   ctx: PluginContext,
-): Promise<HttpResponse<unknown> | null> | HttpResponse<unknown> | null | void {
+): Promise<HttpResponse<unknown> | null> | HttpResponse<unknown> | null {
   const len = hooks.length;
   if (len === 0) return null;
-
   for (let i = 0; i < len; i++) {
     const res = hooks[i]!.run(req, ctx);
-
     if (res instanceof Promise) {
       return executeRequestPipelineAsync(hooks, req, ctx, i, res);
     }
-
     if (res != null) return res;
   }
   return null;
 }
 
 /**
- * @ru Выполняет низкоуровневый конвейер трансформации сырых данных транспорта (фаза DATA). Если хук возвращает измененный TransportResponse, он передается дальше по цепочке.
- * @en Executes low-level transport data transformation pipeline (DATA phase). If a hook returns a modified TransportResponse, it is passed along the chain.
- * @param hooks - Array of response data hooks.
- * @param res - Current transport response.
- * @param ctx - Plugin context.
- * @returns The (possibly transformed) transport response, either directly or wrapped in a promise.
+ * @ru Выполняет низкоуровневый конвейер трансформации сырых данных транспорта (фаза DATA).
+ * @en Executes low-level transport data transformation pipeline (DATA phase).
  */
 export function executeResponseDataPipeline(
   hooks: readonly HookRecord<Required<HyperPlugin>["onResponseData"]>[],
@@ -116,21 +100,12 @@ export function executeResponseDataPipeline(
 ): Promise<TransportResponse> | TransportResponse {
   const len = hooks.length;
   if (len === 0) return res;
-
   let currentRes = res;
   for (let i = 0; i < len; i++) {
     const result = hooks[i]!.run(currentRes, ctx);
-
     if (result instanceof Promise) {
-      return executeResponseDataPipelineAsync(
-        hooks,
-        ctx,
-        i,
-        result,
-        currentRes,
-      );
+      return executeResponseDataPipelineAsync(hooks, ctx, i, result, currentRes);
     }
-
     if (result != null) {
       currentRes = result;
     }
@@ -139,15 +114,8 @@ export function executeResponseDataPipeline(
 }
 
 /**
- * @ru Выполняет конвейер пост-ответа. Разделен на мутаторы (последовательно) и сайд-эффекты (в фоне). Оптимизирован для минимизации выделения памяти под замыкания логгера.
- * @en Executes the post-response pipeline. Split into mutators (sequential) and side-effects (background). Optimized to minimize memory allocations for logger closures.
- * @param mutators - Hooks that mutate the response (executed sequentially).
- * @param sideEffects - Hooks that run in background, errors are logged but do not break the main flow.
- * @param res - HTTP response object.
- * @param req - Internal request object.
- * @param ctx - Plugin context.
- * @param logger - Optional logger for side-effect errors.
- * @returns A promise if any mutator returns a promise, otherwise void.
+ * @ru Выполняет конвейер пост-ответа. Разделен на мутаторы и сайд-эффекты.
+ * @en Executes the post-response pipeline. Split into mutators and side-effects.
  */
 export function executeResponsePipeline(
   mutators: readonly HookRecord<Required<HyperPlugin>["onResponse"]>[],
@@ -164,21 +132,17 @@ export function executeResponsePipeline(
       try {
         const promise = effect.run(res, req, ctx);
         if (promise instanceof Promise) {
-          promise.catch((err) =>
-            handleSideEffectError(err, effect.name, logger),
-          );
+          safelyAttachSideEffectCatch(promise, effect.name, logger);
         }
       } catch (err) {
         handleSideEffectError(err, effect.name, logger);
       }
     }
   }
-
   const mutLen = mutators.length;
   if (mutLen > 0) {
     for (let i = 0; i < mutLen; i++) {
       const result = mutators[i]!.run(res, req, ctx);
-
       if (result instanceof Promise) {
         return executeMutatorsAsync(mutators, res, req, ctx, i, result);
       }
@@ -187,30 +151,22 @@ export function executeResponsePipeline(
 }
 
 /**
- * @ru Выполняет конвейер перехвата ошибок. Первый вернувший HttpResponse плагин прерывает панику.
- * @en Executes the error interception pipeline. The first plugin that returns HttpResponse stops the panic.
- * @param hooks - Array of error hooks.
- * @param error - The error that occurred.
- * @param req - Internal request object.
- * @param ctx - Plugin context.
- * @returns A response if recovered, null otherwise, or a promise.
+ * @ru Выполняет конвейер перехвата ошибок.
+ * @en Executes the error interception pipeline.
  */
 export function executeErrorPipeline(
   hooks: readonly HookRecord<Required<HyperPlugin>["onError"]>[],
   error: HyperttpError,
   req: InternalRequest,
   ctx: PluginContext,
-): Promise<HttpResponse<unknown> | null> | HttpResponse<unknown> | null | void {
+): Promise<HttpResponse<unknown> | null> | HttpResponse<unknown> | null {
   const len = hooks.length;
   if (len === 0) return null;
-
   for (let i = 0; i < len; i++) {
     const res = hooks[i]!.run(error, req, ctx);
-
     if (res instanceof Promise) {
       return executeErrorPipelineAsync(hooks, error, req, ctx, i, res);
     }
-
     if (res != null) return res;
   }
   return null;
@@ -225,11 +181,15 @@ async function executeRequestPipelineAsync(
 ): Promise<HttpResponse<unknown> | null> {
   const shortCircuit = await initialPromise;
   if (shortCircuit != null) return shortCircuit;
-
   const len = hooks.length;
   for (let i = startIndex + 1; i < len; i++) {
-    const res = await hooks[i]!.run(req, ctx);
-    if (res != null) return res;
+    const res = hooks[i]!.run(req, ctx);
+    if (res instanceof Promise) {
+      const asyncRes = await res;
+      if (asyncRes != null) return asyncRes;
+    } else if (res != null) {
+      return res;
+    }
   }
   return null;
 }
@@ -246,11 +206,15 @@ async function executeResponseDataPipelineAsync(
   if (firstAsyncResult != null) {
     currentRes = firstAsyncResult;
   }
-
   const len = hooks.length;
   for (let i = startIndex + 1; i < len; i++) {
-    const result = await hooks[i]!.run(currentRes, ctx);
-    if (result != null) {
+    const result = hooks[i]!.run(currentRes, ctx);
+    if (result instanceof Promise) {
+      const asyncResult = await result;
+      if (asyncResult != null) {
+        currentRes = asyncResult;
+      }
+    } else if (result != null) {
       currentRes = result;
     }
   }
@@ -268,7 +232,10 @@ async function executeMutatorsAsync(
   await initialPromise;
   const len = mutators.length;
   for (let i = startIndex + 1; i < len; i++) {
-    await mutators[i]!.run(res, req, ctx);
+    const result = mutators[i]!.run(res, req, ctx);
+    if (result instanceof Promise) {
+      await result;
+    }
   }
 }
 
@@ -282,29 +249,33 @@ async function executeErrorPipelineAsync(
 ): Promise<HttpResponse<unknown> | null> {
   const recovered = await initialPromise;
   if (recovered != null) return recovered;
-
   const len = hooks.length;
   for (let i = startIndex + 1; i < len; i++) {
-    const res = await hooks[i]!.run(error, req, ctx);
-    if (res != null) return res;
+    const res = hooks[i]!.run(error, req, ctx);
+    if (res instanceof Promise) {
+      const asyncRes = await res;
+      if (asyncRes != null) return asyncRes;
+    } else if (res != null) {
+      return res;
+    }
   }
   return null;
 }
 
-/**
- * @ru Статический обработчик падений фоновых хуков. Изолирован для предотвращения регенерации замыканий.
- * @en Static handler for background hook crashes. Isolated to prevent closure regeneration.
- * @param err - Caught error.
- * @param hookName - Name of the hook that failed.
- * @param logger - Optional logger.
- */
+function safelyAttachSideEffectCatch(
+  promise: Promise<unknown>,
+  hookName: string,
+  logger?: HttpClientOptions["logger"],
+): void {
+  promise.catch((err) => handleSideEffectError(err, hookName, logger));
+}
+
 function handleSideEffectError(
   err: unknown,
   hookName: string,
   logger?: HttpClientOptions["logger"],
 ): void {
-  logger?.(
-    "warn",
-    `Background hook ${hookName} crashed: ${err instanceof Error ? err.message : String(err)}`,
-  );
+  if (!logger) return;
+  const errorObject = err instanceof Error ? err : new Error(String(err));
+  logger("warn", `Background hook "${hookName}" crashed: ${errorObject.message}`, errorObject);
 }
