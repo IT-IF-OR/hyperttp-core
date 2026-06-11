@@ -387,4 +387,3 @@ MIT
 <p align="center">
   Made with ❤️ by <a href="https://github.com/dirold2">dirold2</a>
 </p>
-```
