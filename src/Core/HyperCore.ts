@@ -112,9 +112,9 @@ export class HyperCore implements IHyperCore {
   public async dispatch<T = unknown>(req: InternalRequest): Promise<HttpResponse<T>> {
     try {
       if (this.hasRequestPlugins) {
-        const shortCircuit = await Promise.resolve(
-          executeRequestPipeline(this.pipelines.request, req, this.pluginCtx),
-        );
+        const syncResult = executeRequestPipeline(this.pipelines.request, req, this.pluginCtx);
+        const shortCircuit = syncResult instanceof Promise ? await syncResult : syncResult;
+
         if (shortCircuit != null) {
           this.recycleRequest(req);
           return shortCircuit as HttpResponse<T>;
@@ -134,9 +134,12 @@ export class HyperCore implements IHyperCore {
       meta.timings = { ...meta.timings, networkMs };
 
       if (this.hasResponseDataPlugins) {
-        rawResponse = await Promise.resolve(
-          executeResponseDataPipeline(this.pipelines.responseData, rawResponse, this.pluginCtx),
+        const syncResult = executeResponseDataPipeline(
+          this.pipelines.responseData,
+          rawResponse,
+          this.pluginCtx,
         );
+        rawResponse = syncResult instanceof Promise ? await syncResult : syncResult;
       }
 
       const response =
@@ -145,16 +148,17 @@ export class HyperCore implements IHyperCore {
           : mapResponseFast(rawResponse);
 
       if (this.hasResponsePlugins) {
-        await Promise.resolve(
-          executeResponsePipeline(
-            this.pipelines.responseMutators,
-            this.pipelines.responseSideEffects,
-            response as HttpResponse,
-            req,
-            this.pluginCtx,
-            this.config.logger,
-          ),
+        const syncResult = executeResponsePipeline(
+          this.pipelines.responseMutators,
+          this.pipelines.responseSideEffects,
+          response as HttpResponse,
+          req,
+          this.pluginCtx,
+          this.config.logger,
         );
+        if (syncResult instanceof Promise) {
+          await syncResult;
+        }
       }
 
       this.recycleRequest(req);

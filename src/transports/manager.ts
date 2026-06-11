@@ -1,15 +1,43 @@
 import type { HttpClientOptions, HyperTransport } from "@hyperttp/types";
 
+/**
+ * @ru Поддерживаемые среды выполнения для автоматического выбора транспорта.
+ * @en Supported runtime environments for automatic transport selection.
+ */
 export type Runtime = "bun" | "node" | "deno" | "browser";
+
+/**
+ * @ru Конструктор транспорта, принимающий конфигурацию клиента.
+ * @en Transport constructor accepting client configuration.
+ */
 type TransportCtor = new (config: HttpClientOptions) => HyperTransport;
 
+/**
+ * @ru Описание транспорта: имя, поддерживаемые среды, пакет, экспорт и приоритет.
+ * @en Transport descriptor: name, supported runtimes, package, export, and priority.
+ */
 type TransportDef = {
+  /** @ru Имя транспорта для логирования. @en Transport name for logging. */
   name: string;
+  /** @ru Список сред, в которых транспорт может работать. @en List of runtimes where the transport can operate. */
   runtime: Runtime[];
+  /** @ru Имя пакета npm или относительный путь для встроенных транспортов. @en npm package name or relative path for built-in transports. */
   pkg: string;
+  /** @ru Имя экспортируемого класса транспорта. @en Exported transport class name. */
   export: string;
+  /** @ru Приоритет выбора (выше значение = раньше попытка загрузки). @en Selection priority (higher value = earlier load attempt). */
   priority: number;
 };
+
+interface ResolveFromModule {
+  (fromDirectory: string, moduleId: string): string;
+  silent?: (fromDirectory: string, moduleId: string) => string | undefined;
+}
+
+interface NodeUrlModule {
+  pathToFileURL: (path: string) => { href: string };
+  fileURLToPath: (url: string) => string;
+}
 
 export const CURRENT_RUNTIME: Runtime = (() => {
   if (typeof Bun !== "undefined") return "bun";
@@ -43,14 +71,14 @@ export const TRANSPORTS: TransportDef[] = [
   {
     name: "Browser",
     runtime: ["browser"],
-    pkg: "../transports/browser.js",
+    pkg: "./browser.js",
     export: "BrowserTransport",
     priority: 80,
   },
   {
     name: "Node",
     runtime: ["node", "bun", "deno"],
-    pkg: "../transports/node.js",
+    pkg: "./node.js",
     export: "NodeTransport",
     priority: 10,
   },
@@ -61,26 +89,81 @@ const CANDIDATES = TRANSPORTS.filter((t) => t.runtime.includes(CURRENT_RUNTIME))
 );
 
 let RESOLVED_RUNTIME_CTOR: TransportCtor | null = null;
-let NODE_RESOLVE_TOOLS: [any, any] | null = null;
+
+let NODE_RESOLVE_TOOLS: [ResolveFromModule, NodeUrlModule] | null = null;
 let ATTEMPTED_TOOLS_LOAD = false;
 
-export const runtimeImport = Function("s", "return import(s)") as <T = any>(
+export const runtimeImport = Function("s", "return import(s)") as <T = unknown>(
   specifier: string,
 ) => Promise<T>;
 
-function isModuleNotFoundError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const code = (err as any).code;
-  if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true;
-  const msg = err instanceof Error ? err.message : "";
-  return (
-    msg.includes("Cannot find module") ||
-    msg.includes("Failed to resolve") ||
-    msg.includes("Failed to load")
-  );
+async function getResolveTools(): Promise<[ResolveFromModule, NodeUrlModule] | null> {
+  if (NODE_RESOLVE_TOOLS || ATTEMPTED_TOOLS_LOAD) return NODE_RESOLVE_TOOLS;
+  ATTEMPTED_TOOLS_LOAD = true;
+
+  try {
+    const [rf, url] = await Promise.all([
+      runtimeImport<{ default?: ResolveFromModule } & ResolveFromModule>("resolve-from").catch(
+        () => null,
+      ),
+      runtimeImport<{ default?: NodeUrlModule } & NodeUrlModule>("node:url").catch(() => null),
+    ]);
+
+    if (rf && url) {
+      NODE_RESOLVE_TOOLS = [rf.default ?? rf, url.default ?? url];
+    }
+  } catch {
+    //
+  }
+  return NODE_RESOLVE_TOOLS;
+}
+
+function getCurrentModuleDir(): string {
+  try {
+    const url = import.meta.url;
+    if (url.startsWith("file://")) {
+      const path = url.slice(7);
+      return path.substring(0, path.lastIndexOf("/"));
+    }
+  } catch {
+    //
+  }
+  return ".";
 }
 
 async function resolveExternalModule(pkg: string): Promise<string | null> {
+  if (CURRENT_RUNTIME === "browser") return null;
+
+  const tools = await getResolveTools();
+
+  if (tools) {
+    const [resolveFrom, urlModule] = tools;
+
+    try {
+      let cwd = ".";
+      try {
+        cwd = process.cwd();
+      } catch {}
+
+      const physicalPath = resolveFrom.silent?.(cwd, pkg) ?? resolveFrom(cwd, pkg);
+      if (physicalPath) {
+        return urlModule.pathToFileURL(physicalPath).href;
+      }
+    } catch {
+      //
+    }
+
+    try {
+      const coreDir = getCurrentModuleDir();
+      const physicalPath = resolveFrom.silent?.(coreDir, pkg) ?? resolveFrom(coreDir, pkg);
+      if (physicalPath) {
+        return urlModule.pathToFileURL(physicalPath).href;
+      }
+    } catch {
+      //
+    }
+  }
+
   try {
     if (typeof import.meta.resolve === "function") {
       return import.meta.resolve(pkg, import.meta.url);
@@ -89,48 +172,32 @@ async function resolveExternalModule(pkg: string): Promise<string | null> {
     //
   }
 
-  if (CURRENT_RUNTIME !== "browser") {
-    try {
-      if (!NODE_RESOLVE_TOOLS && !ATTEMPTED_TOOLS_LOAD) {
-        ATTEMPTED_TOOLS_LOAD = true;
-        NODE_RESOLVE_TOOLS = await Promise.all([
-          runtimeImport("resolve-from").catch(() => null),
-          runtimeImport("node:url").catch(() => null),
-        ]);
-      }
-
-      if (!NODE_RESOLVE_TOOLS || !NODE_RESOLVE_TOOLS[0] || !NODE_RESOLVE_TOOLS[1]) return null;
-
-      const resolveFrom = NODE_RESOLVE_TOOLS[0].default ?? NODE_RESOLVE_TOOLS[0];
-      const url = NODE_RESOLVE_TOOLS[1].default ?? NODE_RESOLVE_TOOLS[1];
-
-      let cwd = ".";
-      try {
-        cwd = process.cwd();
-      } catch {
-        //
-      }
-
-      const physicalPath = resolveFrom.silent?.(cwd, pkg) ?? resolveFrom(cwd, pkg);
-      if (physicalPath) {
-        return url.pathToFileURL(physicalPath).href;
-      }
-    } catch {
-      //
-    }
-  }
   return null;
+}
+
+function isModuleNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = "code" in err ? (err as Record<string, unknown>).code : undefined;
+  if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true;
+
+  const msg = err instanceof Error ? err.message : "";
+  return (
+    msg.includes("Cannot find module") ||
+    msg.includes("Failed to resolve") ||
+    msg.includes("Failed to load")
+  );
 }
 
 async function loadCtor(pkg: string, exportName: string): Promise<TransportCtor | null> {
   if (CURRENT_RUNTIME === "browser") {
-    if (pkg !== "../transports/browser.js") return null;
-    const mod = (await import("../transports/browser.js")) as any;
+    if (pkg !== "./browser.js") return null;
+    const mod = (await import("./browser.js")) as Record<string, unknown>;
     const candidate = mod[exportName] ?? mod.default;
-    return typeof candidate === "function" ? candidate : null;
+    return typeof candidate === "function" ? (candidate as TransportCtor) : null;
   }
 
   let specifier = pkg;
+
   if (pkg[0] === "." || pkg[0] === "/") {
     try {
       specifier = import.meta.resolve(pkg, import.meta.url);
@@ -147,7 +214,17 @@ async function loadCtor(pkg: string, exportName: string): Promise<TransportCtor 
     const candidate = mod[exportName] ?? mod.default;
     return typeof candidate === "function" ? (candidate as TransportCtor) : null;
   } catch (err) {
-    if (isModuleNotFoundError(err)) return null;
+    if (isModuleNotFoundError(err)) {
+      const isNativeTransport = pkg.includes(CURRENT_RUNTIME);
+      const isDebugEnabled = typeof process !== "undefined" && process.env?.HYPERTTP_DEBUG;
+
+      if (isNativeTransport || isDebugEnabled) {
+        console.warn(`\n⚠️ [Hyperttp Debug] Failed to load preferred transport "${pkg}":`);
+        console.error(err);
+        console.warn(`Falling back to alternative transport...\n`);
+      }
+      return null;
+    }
     throw err;
   }
 }
@@ -224,8 +301,14 @@ export class TransportManager {
 
   public setConfig(config: HttpClientOptions): void {
     this.config = config;
-    if (this.transport && typeof (this.transport as any).setConfig === "function") {
-      (this.transport as any).setConfig(config);
+
+    if (this.transport && "setConfig" in this.transport) {
+      const dynamicTarget = this.transport as {
+        setConfig: (config: HttpClientOptions) => void;
+      };
+      if (typeof dynamicTarget.setConfig === "function") {
+        dynamicTarget.setConfig(config);
+      }
     }
   }
 
@@ -234,12 +317,18 @@ export class TransportManager {
     if (!t) return;
 
     try {
-      if (graceful && typeof t.close === "function") {
-        await t.close();
-        return;
+      if (graceful && "close" in t) {
+        const closable = t as { close: () => Promise<void> | void };
+        if (typeof closable.close === "function") {
+          await closable.close();
+          return;
+        }
       }
-      if (typeof t.destroy === "function") {
-        await t.destroy();
+      if ("destroy" in t) {
+        const destroyable = t as { destroy: () => Promise<void> | void };
+        if (typeof destroyable.destroy === "function") {
+          await destroyable.destroy();
+        }
       }
     } finally {
       this.transport = null;

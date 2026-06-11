@@ -80,11 +80,14 @@ export function executeRequestPipeline(
   const len = hooks.length;
   if (len === 0) return null;
   for (let i = 0; i < len; i++) {
-    const res = hooks[i]!.run(req, ctx);
-    if (res instanceof Promise) {
-      return executeRequestPipelineAsync(hooks, req, ctx, i, res);
+    const hook = hooks[i]!;
+    const res = hook.run(req, ctx);
+    if (res !== null && res !== undefined) {
+      if (res instanceof Promise) {
+        return executeRequestPipelineAsync(hooks, req, ctx, i, res);
+      }
+      return res;
     }
-    if (res != null) return res;
   }
   return null;
 }

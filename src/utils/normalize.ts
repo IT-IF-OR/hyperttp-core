@@ -256,11 +256,9 @@ export function normalizeHeaders(headers: unknown): NormalizedHeaders {
 
   if (!Array.isArray(headers)) {
     for (const key in headers) {
-      if (Object.prototype.hasOwnProperty.call(headers, key)) {
-        const val = (headers as Record<string, unknown>)[key];
-        if (val !== undefined && val !== null) {
-          appendRawValue(out, fastLowercaseKey(key), val);
-        }
+      const val = (headers as Record<string, unknown>)[key];
+      if (val !== undefined && val !== null) {
+        appendRawValue(out, fastLowercaseKey(key), val);
       }
     }
     return out;
