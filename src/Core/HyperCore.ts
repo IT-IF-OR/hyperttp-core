@@ -122,7 +122,16 @@ export class HyperCore implements IHyperCore {
       }
 
       const transport = this.transportManager.getSync() ?? (await this.transportReady);
+
+      const networkStart = performance.now();
       let rawResponse = await transport.execute(req as TransportArgs);
+      const networkMs = performance.now() - networkStart;
+
+      const meta = (req.meta ??= {}) as {
+        responseType?: string;
+        timings?: { networkMs?: number; serializationMs?: number };
+      };
+      meta.timings = { ...meta.timings, networkMs };
 
       if (this.hasResponseDataPlugins) {
         rawResponse = await Promise.resolve(
