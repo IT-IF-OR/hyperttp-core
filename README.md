@@ -384,12 +384,6 @@ MIT
 
 ---
 
-## 🤝 Contributing
-
-Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details.
-
----
-
 <p align="center">
   Made with ❤️ by <a href="https://github.com/dirold2">dirold2</a>
 </p>
