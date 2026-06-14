@@ -33,7 +33,7 @@ type TransportArgs = Parameters<HyperTransport["execute"]>[0];
  * @en Global URL cache to avoid repeated parsing via `new URL()`.
  * Uses `Object.create(null)` for fast prototype-less access.
  */
-const urlCache: Record<string, string> = Object.create(null);
+let urlCache: Record<string, string> = Object.create(null);
 let urlCacheCount = 0;
 const MAX_CACHE_SIZE = 512;
 
@@ -164,7 +164,6 @@ export class HyperCore implements IHyperCore {
       this.recycleRequest(req);
       return response as HttpResponse<T>;
     } catch (error) {
-      this.recycleRequest(req);
       return this.handleDispatchError(error as Error, req);
     }
   }
@@ -439,30 +438,35 @@ export class HyperCore implements IHyperCore {
     error: Error,
     req: InternalRequest,
   ): Promise<HttpResponse<T>> {
-    if (this.hasErrorPlugins) {
-      const recovered = await executeErrorPipeline(
-        this.pipelines.error,
-        error as HyperttpError,
-        req,
-        this.pluginCtx,
-      );
-      if (recovered != null) {
-        if (this.hasResponsePlugins) {
-          await Promise.resolve(
-            executeResponsePipeline(
+    try {
+      if (this.hasErrorPlugins) {
+        const recovered = await executeErrorPipeline(
+          this.pipelines.error,
+          error as HyperttpError,
+          req,
+          this.pluginCtx,
+        );
+        if (recovered != null) {
+          if (this.hasResponsePlugins) {
+            const syncResult = executeResponsePipeline(
               this.pipelines.responseMutators,
               this.pipelines.responseSideEffects,
               recovered as HttpResponse,
               req,
               this.pluginCtx,
               this.config.logger,
-            ),
-          );
+            );
+            if (syncResult instanceof Promise) {
+              await syncResult;
+            }
+          }
+          return recovered as HttpResponse<T>;
         }
-        return recovered as HttpResponse<T>;
       }
+      throw error;
+    } finally {
+      this.recycleRequest(req);
     }
-    throw error;
   }
 
   /**
@@ -511,10 +515,12 @@ export class HyperCore implements IHyperCore {
       if (req.query) this.appendQueryParams(urlObj, req.query);
       finalUrl = urlObj.href;
 
-      if (urlCacheCount < MAX_CACHE_SIZE) {
-        urlCache[rawUrl] = finalUrl;
-        urlCacheCount++;
+      if (urlCacheCount >= MAX_CACHE_SIZE) {
+        urlCache = Object.create(null);
+        urlCacheCount = 0;
       }
+      urlCache[rawUrl] = finalUrl;
+      urlCacheCount++;
     }
 
     internalReq.method = method;
@@ -542,6 +548,7 @@ export class HyperCore implements IHyperCore {
    */
   private recycleRequest(req: InternalRequest): void {
     if (requestPool.length < MAX_POOL_SIZE) {
+      req.url = "";
       req.body = undefined;
       req.signal = undefined;
       req.meta = undefined;
@@ -566,10 +573,13 @@ export class HyperCore implements IHyperCore {
 
     finalUrl = !hasQuery || !isAbsolute ? new URL(url).href : url;
 
-    if (urlCacheCount < MAX_CACHE_SIZE) {
-      urlCache[url] = finalUrl;
-      urlCacheCount++;
+    if (urlCacheCount >= MAX_CACHE_SIZE) {
+      urlCache = Object.create(null);
+      urlCacheCount = 0;
     }
+    urlCache[url] = finalUrl;
+    urlCacheCount++;
+
     return finalUrl;
   }
 

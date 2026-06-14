@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "High-performance, extensible HTTP client for Node.js, Bun, Deno and Browser",
   "type": "module",
   "sideEffects": false,
@@ -47,9 +47,6 @@
     "@hyperttp/transport-undici": {
       "optional": true
     }
-  },
-  "dependencies": {
-    "resolve-from": "^5.0.0"
   },
   "devDependencies": {
     "@dirold2/dev-tools": "^1.0.16",

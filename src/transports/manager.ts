@@ -29,16 +29,6 @@ type TransportDef = {
   priority: number;
 };
 
-interface ResolveFromModule {
-  (fromDirectory: string, moduleId: string): string;
-  silent?: (fromDirectory: string, moduleId: string) => string | undefined;
-}
-
-interface NodeUrlModule {
-  pathToFileURL: (path: string) => { href: string };
-  fileURLToPath: (url: string) => string;
-}
-
 export const CURRENT_RUNTIME: Runtime = (() => {
   if (typeof Bun !== "undefined") return "bun";
   if (typeof Deno !== "undefined") return "deno";
@@ -90,90 +80,14 @@ const CANDIDATES = TRANSPORTS.filter((t) => t.runtime.includes(CURRENT_RUNTIME))
 
 let RESOLVED_RUNTIME_CTOR: TransportCtor | null = null;
 
-let NODE_RESOLVE_TOOLS: [ResolveFromModule, NodeUrlModule] | null = null;
-let ATTEMPTED_TOOLS_LOAD = false;
-
+/**
+ * @ru Динамический импорт, изолированный от статического анализа сборщиков.
+ * Используется как ядром, так и модулем декомпрессии.
+ * @en Dynamic import isolated from bundlers' static analysis.
+ */
 export const runtimeImport = Function("s", "return import(s)") as <T = unknown>(
   specifier: string,
 ) => Promise<T>;
-
-async function getResolveTools(): Promise<[ResolveFromModule, NodeUrlModule] | null> {
-  if (NODE_RESOLVE_TOOLS || ATTEMPTED_TOOLS_LOAD) return NODE_RESOLVE_TOOLS;
-  ATTEMPTED_TOOLS_LOAD = true;
-
-  try {
-    const [rf, url] = await Promise.all([
-      runtimeImport<{ default?: ResolveFromModule } & ResolveFromModule>("resolve-from").catch(
-        () => null,
-      ),
-      runtimeImport<{ default?: NodeUrlModule } & NodeUrlModule>("node:url").catch(() => null),
-    ]);
-
-    if (rf && url) {
-      NODE_RESOLVE_TOOLS = [rf.default ?? rf, url.default ?? url];
-    }
-  } catch {
-    //
-  }
-  return NODE_RESOLVE_TOOLS;
-}
-
-function getCurrentModuleDir(): string {
-  try {
-    const url = import.meta.url;
-    if (url.startsWith("file://")) {
-      const path = url.slice(7);
-      return path.substring(0, path.lastIndexOf("/"));
-    }
-  } catch {
-    //
-  }
-  return ".";
-}
-
-async function resolveExternalModule(pkg: string): Promise<string | null> {
-  if (CURRENT_RUNTIME === "browser") return null;
-
-  const tools = await getResolveTools();
-
-  if (tools) {
-    const [resolveFrom, urlModule] = tools;
-
-    try {
-      let cwd = ".";
-      try {
-        cwd = process.cwd();
-      } catch {}
-
-      const physicalPath = resolveFrom.silent?.(cwd, pkg) ?? resolveFrom(cwd, pkg);
-      if (physicalPath) {
-        return urlModule.pathToFileURL(physicalPath).href;
-      }
-    } catch {
-      //
-    }
-
-    try {
-      const coreDir = getCurrentModuleDir();
-      const physicalPath = resolveFrom.silent?.(coreDir, pkg) ?? resolveFrom(coreDir, pkg);
-      if (physicalPath) {
-        return urlModule.pathToFileURL(physicalPath).href;
-      }
-    } catch {
-      //
-    }
-  }
-
-  try {
-    if (typeof import.meta.resolve === "function") {
-      return import.meta.resolve(pkg, import.meta.url);
-    }
-  } catch {
-    //
-  }
-
-  return null;
-}
 
 function isModuleNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
@@ -188,6 +102,17 @@ function isModuleNotFoundError(err: unknown): boolean {
   );
 }
 
+function logDebugFallback(pkg: string, err: unknown): void {
+  const isNativeTransport = pkg.includes(CURRENT_RUNTIME);
+  const isDebugEnabled = typeof process !== "undefined" && process.env?.HYPERTTP_DEBUG;
+
+  if (isNativeTransport || isDebugEnabled) {
+    console.warn(`\n⚠️ [Hyperttp Debug] Failed to load preferred transport "${pkg}":`);
+    console.error(err);
+    console.warn(`Falling back to alternative transport...\n`);
+  }
+}
+
 async function loadCtor(pkg: string, exportName: string): Promise<TransportCtor | null> {
   if (CURRENT_RUNTIME === "browser") {
     if (pkg !== "./browser.js") return null;
@@ -198,15 +123,15 @@ async function loadCtor(pkg: string, exportName: string): Promise<TransportCtor 
 
   let specifier = pkg;
 
-  if (pkg[0] === "." || pkg[0] === "/") {
-    try {
-      specifier = import.meta.resolve(pkg, import.meta.url);
-    } catch {
-      //
+  try {
+    if (typeof import.meta.resolve === "function") {
+      specifier = import.meta.resolve(pkg);
     }
-  } else {
-    const resolved = await resolveExternalModule(pkg);
-    if (resolved) specifier = resolved;
+  } catch (err) {
+    if (isModuleNotFoundError(err)) {
+      logDebugFallback(pkg, err);
+      return null;
+    }
   }
 
   try {
@@ -215,14 +140,7 @@ async function loadCtor(pkg: string, exportName: string): Promise<TransportCtor 
     return typeof candidate === "function" ? (candidate as TransportCtor) : null;
   } catch (err) {
     if (isModuleNotFoundError(err)) {
-      const isNativeTransport = pkg.includes(CURRENT_RUNTIME);
-      const isDebugEnabled = typeof process !== "undefined" && process.env?.HYPERTTP_DEBUG;
-
-      if (isNativeTransport || isDebugEnabled) {
-        console.warn(`\n⚠️ [Hyperttp Debug] Failed to load preferred transport "${pkg}":`);
-        console.error(err);
-        console.warn(`Falling back to alternative transport...\n`);
-      }
+      logDebugFallback(pkg, err);
       return null;
     }
     throw err;
