@@ -12,9 +12,10 @@ import type {
   RequestBodyData,
   Method,
   ResponseType,
+  TransportResponse,
 } from "@hyperttp/types";
 import { defaultConfig } from "../defaultConfig.js";
-import { mapResponseFast, mapStreamFast, mergeHeadersFast } from "../utils/response.js";
+import { mapResponseFast, mapStreamFast } from "../utils/response.js";
 import { TransportManager } from "../transports/manager.js";
 import {
   createPipelines,
@@ -24,26 +25,44 @@ import {
   executeResponseDataPipeline,
   insertHookSorted,
 } from "../utils/pipeline.js";
-import { normalizeBody, normalizeHeaders, normalizeUrl } from "../utils/normalize.js";
+import { normalizeHeaders, normalizeBodyForTransport } from "../utils/normalize.js";
+import { calcDelay, shouldRetry, drainBody } from "../utils/retryUtils.js";
+import { TimeoutError } from "../utils/errors.js";
+import { RequestBuilder } from "./RequestBuilder.js";
 
 type TransportArgs = Parameters<HyperTransport["execute"]>[0];
 
-/**
- * @ru Глобальный кэш URL для избежания повторного парсинга через `new URL()`.
- * Использует `Object.create(null)` для быстрого доступа без прототипа.
- * @en Global URL cache to avoid repeated parsing via `new URL()`.
- * Uses `Object.create(null)` for fast prototype-less access.
- */
-let urlCache: Record<string, string> = Object.create(null);
-let urlCacheCount = 0;
-const MAX_CACHE_SIZE = 512;
-
-/**
- * @ru Пул переиспользуемых объектов InternalRequest для zero-allocation в горячем пути.
- * @en Pool of reusable InternalRequest objects for zero-allocation in the hot path.
- */
-const requestPool: InternalRequest[] = [];
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const MAX_POOL_SIZE = 64;
+
+class Semaphore {
+  private current = 0;
+  private queue: Array<() => void> = [];
+
+  constructor(private max: number) {}
+
+  acquire(): Promise<void> {
+    if (this.current < this.max) {
+      this.current++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.queue.push(() => {
+        this.current++;
+        resolve();
+      });
+    });
+  }
+
+  release(): void {
+    const next = this.queue.shift();
+    if (next) {
+      next();
+    } else {
+      this.current--;
+    }
+  }
+}
 
 /**
  * @ru Ядро HTTP-клиента Hyperttp. Обеспечивает диспетчеризацию запросов через
@@ -58,7 +77,10 @@ export class HyperCore implements IHyperCore {
   private readonly defaultHeaders: Record<string, string | string[]>;
   private readonly pluginCtx: PluginContext;
   private readonly pipelines = createPipelines();
+  private readonly requestBuilder = new RequestBuilder();
+  private readonly requestPool: InternalRequest[] = [];
 
+  private semaphore: Semaphore | null = null;
   private hasRequestPlugins = false;
   private hasResponseDataPlugins = false;
   private hasResponsePlugins = false;
@@ -95,6 +117,9 @@ export class HyperCore implements IHyperCore {
       ...this.config.network?.headers,
     });
 
+    const maxConcurrent = this.config.network?.maxConcurrent;
+    this.semaphore = maxConcurrent != null && maxConcurrent > 0 ? new Semaphore(maxConcurrent) : null;
+
     this.pluginCtx = { config: this.config, core: this };
   }
 
@@ -118,75 +143,111 @@ export class HyperCore implements IHyperCore {
    * @returns Promise resolving to the HTTP response.
    */
   public async dispatch<T = unknown>(req: InternalRequest): Promise<HttpResponse<T>> {
-    try {
-      if (this.hasRequestPlugins) {
-        const syncResult = executeRequestPipeline(this.pipelines.request, req, this.pluginCtx);
-        const shortCircuit = syncResult instanceof Promise ? await syncResult : syncResult;
+    const retryOpts = this.config.retry ?? {};
+    const maxRetries = retryOpts.maxRetries ?? 0;
 
-        if (shortCircuit != null) {
-          this.recycleRequest(req);
-          return shortCircuit as HttpResponse<T>;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (this.hasRequestPlugins) {
+          const syncResult = executeRequestPipeline(this.pipelines.request, req, this.pluginCtx);
+          const shortCircuit = syncResult instanceof Promise ? await syncResult : syncResult;
+
+          if (shortCircuit != null) {
+            this.recycleRequest(req);
+            return shortCircuit as HttpResponse<T>;
+          }
         }
-      }
 
-      const transport =
-        this.transportManager.transport ??
-        this.transportManager.getSync() ??
-        (await this.transportReady);
-
-      const networkStart = performance.now();
-      let rawResponse = await transport.execute(req as TransportArgs);
-      const networkMs = performance.now() - networkStart;
-
-      const meta = req.meta as {
-        responseType?: ResponseType;
-        timings?: { networkMs?: number };
-      };
-      if (meta.timings) {
-        meta.timings.networkMs = networkMs;
-      }
-
-      if (this.hasResponseDataPlugins) {
-        const syncResult = executeResponseDataPipeline(
-          this.pipelines.responseData,
-          rawResponse,
-          this.pluginCtx,
-        );
-        rawResponse = syncResult instanceof Promise ? await syncResult : syncResult;
-      }
-
-      const response =
-        meta.responseType === "stream" ? mapStreamFast(rawResponse) : mapResponseFast(rawResponse);
-
-      if (this.hasResponsePlugins) {
-        const reqForPipeline =
-          this.pipelines.responseSideEffects.length > 0
-            ? {
-                ...req,
-                meta: {
-                  ...meta,
-                  timings: meta.timings ? { ...meta.timings } : undefined,
-                },
-              }
-            : req;
-
-        const syncResult = executeResponsePipeline(
-          this.pipelines.responseMutators,
-          this.pipelines.responseSideEffects,
-          response as HttpResponse,
-          reqForPipeline,
-          this.pluginCtx,
-          this.config.logger,
-        );
-        if (syncResult instanceof Promise) {
-          await syncResult;
+        if (req.body != null) {
+          req.body = normalizeBodyForTransport(req.body, req.headers);
         }
-      }
 
-      this.recycleRequest(req);
-      return response as HttpResponse<T>;
-    } catch (error) {
-      return this.handleDispatchError(error as Error, req);
+        const transport =
+          this.transportManager.transport ??
+          this.transportManager.getSync() ??
+          (await this.transportReady);
+
+        if (this.semaphore) await this.semaphore.acquire();
+        let rawResponse: TransportResponse;
+        const networkStart = performance.now();
+        try {
+          rawResponse = await transport.execute(req as TransportArgs);
+        } finally {
+          this.semaphore?.release();
+        }
+        const networkMs = performance.now() - networkStart;
+
+        const meta = req.meta as {
+          responseType?: ResponseType;
+          timings?: { networkMs?: number };
+        };
+        if (meta.timings) {
+          meta.timings.networkMs = networkMs;
+        }
+
+        if (attempt < maxRetries && shouldRetry(rawResponse.status, retryOpts)) {
+          await drainBody(rawResponse.body);
+          await sleep(calcDelay(attempt, retryOpts));
+          continue;
+        }
+
+        if (this.hasResponseDataPlugins) {
+          const syncResult = executeResponseDataPipeline(
+            this.pipelines.responseData,
+            rawResponse,
+            this.pluginCtx,
+          );
+          rawResponse = syncResult instanceof Promise ? await syncResult : syncResult;
+        }
+
+        const response =
+          meta.responseType === "stream"
+            ? mapStreamFast(rawResponse)
+            : mapResponseFast(rawResponse);
+
+        if (this.hasResponsePlugins) {
+          const reqForPipeline =
+            this.pipelines.responseSideEffects.length > 0
+              ? {
+                  ...req,
+                  meta: {
+                    ...meta,
+                    timings: meta.timings ? { ...meta.timings } : undefined,
+                  },
+                }
+              : req;
+
+          const syncResult = executeResponsePipeline(
+            this.pipelines.responseMutators,
+            this.pipelines.responseSideEffects,
+            response as HttpResponse,
+            reqForPipeline,
+            this.pluginCtx,
+            this.config.logger,
+          );
+          if (syncResult instanceof Promise) {
+            await syncResult;
+          }
+        }
+
+        this.recycleRequest(req);
+        return response as HttpResponse<T>;
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          const timeout = this.config.network?.timeout;
+          if (timeout != null && timeout > 0) {
+            return this.handleDispatchError(new TimeoutError(req.url, timeout), req);
+          }
+          return this.handleDispatchError(error, req);
+        }
+
+        if (attempt < maxRetries && !req.signal?.aborted) {
+          await sleep(calcDelay(attempt, retryOpts));
+          continue;
+        }
+
+        return this.handleDispatchError(error as Error, req);
+      }
     }
   }
 
@@ -529,110 +590,17 @@ export class HyperCore implements IHyperCore {
     signal?: AbortSignal,
     responseType?: "stream",
   ): InternalRequest {
-    const pooled = requestPool.pop();
-    const internalReq = pooled ?? {
-      method: "GET" as Method,
-      url: "",
-      headers: this.defaultHeaders,
-      body: undefined,
-      signal: undefined,
-      meta: {
-        responseType: undefined as ResponseType | undefined,
-        timings: {
-          networkMs: undefined as number | undefined,
-        },
-      },
-      stealth: undefined,
-    };
-
-    const metaObj = internalReq.meta as {
-      responseType: ResponseType | undefined;
-      timings: {
-        networkMs: number | undefined;
-      };
-    };
-
-    if (typeof req === "string") {
-      internalReq.method = method;
-      internalReq.url = this.resolveUrl(req);
-      internalReq.headers = this.hasRequestPlugins
-        ? { ...this.defaultHeaders }
-        : this.defaultHeaders;
-      internalReq.body = body !== undefined ? normalizeBody(method, body) : undefined;
-      internalReq.signal = signal;
-
-      metaObj.responseType = responseType;
-
-      internalReq.stealth = this.config.network?.stealth;
-      return internalReq;
-    }
-
-    const rawUrl = normalizeUrl(req);
-    if (!rawUrl) throw new Error(`[HyperCore] URL is undefined for ${method}`);
-
-    let finalUrl: string;
-
-    if (req.query) {
-      const cacheKey = rawUrl + "_base";
-      let baseUrl = urlCache[cacheKey];
-
-      if (!baseUrl) {
-        baseUrl = this.config.baseURL
-          ? new URL(rawUrl, this.config.baseURL).href
-          : new URL(rawUrl).href;
-
-        this.ensureCacheSpace();
-        urlCache[cacheKey] = baseUrl;
-        urlCacheCount++;
-      }
-
-      const urlObj = new URL(baseUrl);
-      this.appendQueryParams(urlObj, req.query);
-      finalUrl = urlObj.href;
-    } else {
-      let cachedUrl = urlCache[rawUrl];
-      if (!cachedUrl) {
-        cachedUrl = this.config.baseURL
-          ? new URL(rawUrl, this.config.baseURL).href
-          : new URL(rawUrl).href;
-
-        if (urlCacheCount >= MAX_CACHE_SIZE) {
-          urlCache = Object.create(null);
-          urlCacheCount = 0;
-        }
-        urlCache[rawUrl] = cachedUrl;
-        urlCacheCount++;
-      }
-      finalUrl = cachedUrl;
-    }
-
-    internalReq.method = method;
-    internalReq.url = finalUrl;
-    internalReq.headers = req.headers
-      ? mergeHeadersFast(this.defaultHeaders, req.headers)
-      : { ...this.defaultHeaders };
-    internalReq.body = normalizeBody(method, req.body ?? body);
-    internalReq.signal = req.signal ?? signal;
-
-    metaObj.responseType =
-      responseType ?? (req.meta as { responseType?: ResponseType })?.responseType;
-
-    if (req.stealth) {
-      internalReq.stealth = this.config.network?.stealth
-        ? { ...this.config.network.stealth, ...req.stealth }
-        : req.stealth;
-    } else {
-      internalReq.stealth = this.config.network?.stealth;
-    }
-
-    return internalReq;
-  }
-
-  private ensureCacheSpace(): void {
-    if (urlCacheCount >= MAX_CACHE_SIZE) {
-      urlCache = Object.create(null);
-      urlCacheCount = 0;
-    }
+    const pooled = this.requestPool.pop();
+    return this.requestBuilder.build(
+      method,
+      req,
+      body,
+      signal,
+      responseType,
+      this.defaultHeaders,
+      this.config,
+      pooled,
+    );
   }
 
   /**
@@ -641,7 +609,7 @@ export class HyperCore implements IHyperCore {
    * @param req - The internal request object to recycle.
    */
   private recycleRequest(req: InternalRequest): void {
-    if (requestPool.length < MAX_POOL_SIZE) {
+    if (this.requestPool.length < MAX_POOL_SIZE) {
       req.method = "GET";
       req.url = "";
       req.headers = this.defaultHeaders;
@@ -659,57 +627,7 @@ export class HyperCore implements IHyperCore {
         }
       }
 
-      requestPool.push(req);
-    }
-  }
-
-  /**
-   * @ru Разрешает и кэширует URL, нормализуя его через URL API при необходимости.
-   * @en Resolves and caches the URL, normalizing it via the URL API when necessary.
-   * @param url - The raw URL string.
-   * @returns The resolved and cached URL string.
-   */
-  private resolveUrl(url: string): string {
-    if (!url) throw new Error("[HyperCore] URL is undefined");
-
-    let finalUrl = urlCache[url];
-    if (finalUrl) return finalUrl;
-
-    const isAbsolute = url.startsWith("http://") || url.startsWith("https://");
-
-    if (isAbsolute && !url.includes("?")) {
-      finalUrl = url;
-    } else {
-      finalUrl = this.config.baseURL ? new URL(url, this.config.baseURL).href : new URL(url).href;
-    }
-
-    if (urlCacheCount >= MAX_CACHE_SIZE) {
-      urlCache = Object.create(null);
-      urlCacheCount = 0;
-    }
-    urlCache[url] = finalUrl;
-    urlCacheCount++;
-
-    return finalUrl;
-  }
-
-  /**
-   * @ru Добавляет query-параметры к объект URL, поддерживая массивы значений.
-   * @en Appends query parameters to the URL object, supporting arrays of values.
-   * @param url - The URL object to modify.
-   * @param query - Record of query parameter key-value pairs.
-   */
-  private appendQueryParams(url: URL, query: Record<string, unknown>): void {
-    for (const k in query) {
-      if (Object.prototype.hasOwnProperty.call(query, k)) {
-        const v = query[k];
-        if (v == null) continue;
-        if (Array.isArray(v)) {
-          for (let j = 0; j < v.length; j++) url.searchParams.append(k, String(v[j]));
-        } else {
-          url.searchParams.set(k, String(v));
-        }
-      }
+      this.requestPool.push(req);
     }
   }
 

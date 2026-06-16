@@ -96,13 +96,6 @@ Object.freeze(INTERNAL_TRANSPORTS);
 const ALLOWED_PACKAGES = new Set<string>(INTERNAL_TRANSPORTS.map((t) => t.pkg));
 
 /**
- * @ru Возвращает список зарегистрированных транспортов (readonly для безопасности).
- * @en Returns the list of registered transports (readonly for safety).
- * @returns Readonly array of transport definitions.
- */
-export const getRegisteredTransports = (): readonly TransportDef[] => INTERNAL_TRANSPORTS;
-
-/**
  * @ru Отфильтрованный и отсортированный список транспортов для текущей среды.
  * Вычисляется один раз при загрузке модуля.
  * @en Filtered and sorted list of transports for the current runtime.
@@ -117,19 +110,6 @@ const CANDIDATES = INTERNAL_TRANSPORTS.filter((t) => t.runtime.includes(CURRENT_
  * @en Cached resolved transport constructor to avoid repeated resolution.
  */
 let RESOLVED_RUNTIME_CTOR: TransportCtor | null = null;
-
-/**
- * @ru Динамический импорт, изолированный от статического анализа сборщиков (Vite, Webpack).
- * Используется как ядром, так и модулем декомпрессии для ленивой загрузки node:zlib/node:stream.
- * @en Dynamic import isolated from bundlers' static analysis (Vite, Webpack).
- * Used by both the core and decompression module for lazy loading of node:zlib/node:stream.
- * @template T - Expected module type.
- * @param specifier - Module specifier string.
- * @returns Promise resolving to the imported module.
- */
-export const runtimeImport = Function("s", "return import(s)") as <T = unknown>(
-  specifier: string,
-) => Promise<T>;
 
 /**
  * @ru Проверяет, является ли ошибкой отсутствия модуля.
@@ -225,7 +205,7 @@ async function loadCtor(
   }
 
   try {
-    const mod = await runtimeImport<Record<string, unknown>>(specifier);
+    const mod = (await import(specifier)) as Record<string, unknown>;
     const candidate = mod[exportName] ?? mod.default;
     return typeof candidate === "function" ? (candidate as TransportCtor) : null;
   } catch (err) {

@@ -278,7 +278,10 @@ function handleSideEffectError(
   hookName: string,
   logger?: HttpClientOptions["logger"],
 ): void {
-  if (!logger) return;
   const errorObject = err instanceof Error ? err : new Error(String(err));
-  logger("warn", `Background hook "${hookName}" crashed: ${errorObject.message}`, errorObject);
+  if (logger) {
+    logger("warn", `Background hook "${hookName}" crashed: ${errorObject.message}`, errorObject);
+  } else {
+    console.warn(`[Hyperttp] Background hook "${hookName}" crashed:`, errorObject);
+  }
 }

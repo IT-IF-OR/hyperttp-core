@@ -4,6 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@hyperttp/core)](https://www.npmjs.com/package/@hyperttp/core)
 [![npm downloads](https://img.shields.io/npm/dm/@hyperttp/core)](https://www.npmjs.com/package/@hyperttp/core)
+[![bundle size](https://img.shields.io/bundlephobia/minzip/@hyperttp/core)](https://bundlephobia.com/package/@hyperttp/core)
 [![license](https://img.shields.io/npm/l/@hyperttp/core)](./LICENSE)
 [![typescript](https://img.shields.io/badge/TypeScript-strict-blue)](https://www.typescriptlang.org/)
 
@@ -41,6 +42,8 @@
 - **🔌 Многоэтапные хуки и конвейеры:** Детальный контроль над жизненным циклом запроса с сортировкой хуков по приоритету и возможностью короткого замыкания (short-circuit).
 - **🗜️ Прозрачная декомпрессия:** Автоматическая обработка кодировок `gzip`, `deflate` и `br` (Brotli) "из коробки" как для стандартных буферов `Uint8Array`, так и для данных `ReadableStream`.
 - **💎 Сохранение прототипов:** Безопасный внутренний маппинг, который уважает и передаёт пользовательские прототипы, переданные через конфигурации запросов.
+- **🛡️ Укрепление безопасности:** Ограничение размера тела ответа (`maxResponseBytes`), предотвращение CRLF-инъекций в заголовках, принудительная проверка SSL-сертификатов и ограничение конкурентных запросов (`maxConcurrent`).
+- **📦 Минимальный размер:** ~30.7 KB raw / ~9.6 KB gzip после минификации — без лишних зависимостей.
 - **🦀 Инструментарий на Rust:** Сборка и линтинг с помощью OXC (`oxlint` + `oxfmt`) для молниеносно быстрых циклов разработки.
 
 ---
@@ -234,6 +237,33 @@ class MyCustomTransport implements HyperTransport {
 }
 
 const http = new HyperCore({}, new MyCustomTransport());
+```
+
+---
+
+## 🛡️ Безопасность
+
+@hyperttp/core включает несколько механизмов защиты, встроенных в ядро:
+
+| Защита | Механизм | По умолчанию |
+|---|---|---|
+| **Проверка SSL** | `rejectUnauthorized` принудительно через `https.Agent` в NodeTransport | `true` |
+| **Лимит ответа** | `maxResponseBytes` — стриминг прерывает oversized ответы | без лимита (0) |
+| **CRLF-инъекции** | `\r\n` удаляются из всех значений заголовков в `appendHeader()` | всегда включено |
+| **Троттлинг** | `maxConcurrent` — семафор ограничивает параллельные запросы | без лимита (0) |
+| **Транспорты** | только явно разрешённые пакеты загружаются динамически | строгий |
+| **Prototype Pollution** | все внутренние мапы используют `Object.create(null)` | всегда включено |
+
+Настраивается через конструктор `HyperCore`:
+
+```typescript
+const http = new HyperCore({
+  network: {
+    maxResponseBytes: 10 * 1024 * 1024,   // лимит 10 MB
+    maxConcurrent: 50,                    // макс. 50 запросов одновременно
+    rejectUnauthorized: true,
+  },
+});
 ```
 
 ---

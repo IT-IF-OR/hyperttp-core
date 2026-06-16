@@ -4,6 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@hyperttp/core)](https://www.npmjs.com/package/@hyperttp/core)
 [![npm downloads](https://img.shields.io/npm/dm/@hyperttp/core)](https://www.npmjs.com/package/@hyperttp/core)
+[![bundle size](https://img.shields.io/bundlephobia/minzip/@hyperttp/core)](https://bundlephobia.com/package/@hyperttp/core)
 [![license](https://img.shields.io/npm/l/@hyperttp/core)](./LICENSE)
 [![typescript](https://img.shields.io/badge/TypeScript-strict-blue)](https://www.typescriptlang.org/)
 
@@ -41,6 +42,8 @@ pipeline-based plugin architecture — the foundation upon which the feature-ric
 - **🔌 Multi-Stage Hooks & Pipelines:** Granular control over the request lifecycle with sorted hook priorities and short-circuit capabilities.
 - **🗜️ Transparent Decompression:** Automatic out-of-the-box handling of `gzip`, `deflate`, and `br` (Brotli) content-encodings for both standard `Uint8Array` buffers and `ReadableStream` data.
 - **💎 Prototype Preservation:** Safe internal mapping that respects and carries forward custom prototypes passed via request configurations.
+- **🛡️ Security Hardening:** Response body size limiting (`maxResponseBytes`), CRLF injection prevention in headers, SSL certificate validation enforcement, and concurrent request throttling (`maxConcurrent`).
+- **📦 Tiny Footprint:** ~30.7 KB raw / ~9.6 KB gzip after minification — no unnecessary dependencies.
 - **🦀 Rust-Powered Toolchain:** Built and linted with OXC (`oxlint` + `oxfmt`) for blazing-fast development cycles.
 
 ---
@@ -234,6 +237,33 @@ class MyCustomTransport implements HyperTransport {
 }
 
 const http = new HyperCore({}, new MyCustomTransport());
+```
+
+---
+
+## 🛡️ Security
+
+@hyperttp/core includes several hardening mechanisms built into the core pipeline:
+
+| Protection | Mechanism | Default |
+|---|---|---|
+| **SSL Validation** | `rejectUnauthorized` enforced via `https.Agent` in NodeTransport | `true` |
+| **Response Size Limit** | `maxResponseBytes` — streaming transform aborts oversized responses | unlimited (0) |
+| **CRLF Injection** | `\r\n` stripped from all header values in `appendHeader()` | always on |
+| **Concurrency Throttle** | `maxConcurrent` — semaphore gates transport execution | unlimited (0) |
+| **Transport Whitelist** | only explicitly registered packages can be loaded dynamically | strict |
+| **Prototype Pollution** | all internal maps use `Object.create(null)` | always on |
+
+Configurable via `HyperCore` constructor:
+
+```typescript
+const http = new HyperCore({
+  network: {
+    maxResponseBytes: 10 * 1024 * 1024,   // 10 MB limit
+    maxConcurrent: 50,                    // max 50 in-flight requests
+    rejectUnauthorized: true,
+  },
+});
 ```
 
 ---

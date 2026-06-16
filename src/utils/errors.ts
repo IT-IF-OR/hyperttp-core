@@ -35,23 +35,4 @@ export class TimeoutError extends HttpClientError {
   }
 }
 
-/**
- * @ru Ошибка, генерируемая при получении HTTP-статуса 429 (превышение лимита частоты запросов).
- * @en Error triggered when encountering an HTTP 429 status code indicating rate limit exhaustion.
- */
-export class RateLimitError extends HttpClientError {
-  /**
-   * @ru Создает новый экземпляр RateLimitError.
-   * @en Creates a new RateLimitError instance.
-   */
-  constructor(url: string, retryAfter?: number) {
-    super(
-      `Rate limited${retryAfter ? ` retry in ${retryAfter}ms` : ""}`,
-      "RATE_LIMIT",
-      429,
-      undefined,
-      url,
-    );
-    this.name = "RateLimitError";
-  }
-}
+

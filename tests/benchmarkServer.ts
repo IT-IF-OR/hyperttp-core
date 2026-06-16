@@ -115,7 +115,7 @@ export function createBenchmarkServer() {
       );
     }
 
-    if (pathname === "/post" && method === "POST") {
+    if (pathname === "/post" && (method === "POST" || method === "PUT" || method === "PATCH")) {
       let body = "";
 
       req.on("data", (chunk: Buffer) => {

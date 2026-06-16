@@ -27,26 +27,7 @@ for (const h of [
   SINGLE_VALUE_HEADERS[h] = 1;
 }
 
-/**
- * @ru Кэш нормализованных HTTP-методов для избежания повторных вызовов `toUpperCase()`.
- * @en Cache of normalized HTTP methods to avoid repeated `toUpperCase()` calls.
- */
-const METHOD_CACHE: Record<string, Method> = {
-  get: "GET",
-  GET: "GET",
-  post: "POST",
-  POST: "POST",
-  put: "PUT",
-  PUT: "PUT",
-  delete: "DELETE",
-  DELETE: "DELETE",
-  patch: "PATCH",
-  PATCH: "PATCH",
-  head: "HEAD",
-  HEAD: "HEAD",
-  options: "OPTIONS",
-  OPTIONS: "OPTIONS",
-};
+
 
 /**
  * @ru Кэш для нормализации ключей заголовков (lowercase).
@@ -118,17 +99,6 @@ function fastLowercaseKey(key: string): string {
 }
 
 /**
- * @ru Нормализует HTTP-метод в верхний регистр с кэшированием.
- * @en Normalizes HTTP method to uppercase with caching.
- * @param method - The HTTP method string (e.g., 'get', 'POST').
- * @returns The normalized HTTP method in uppercase.
- */
-export function normalizeMethod(method: string): Method {
-  const cached = METHOD_CACHE[method];
-  return cached !== undefined ? cached : (method.toUpperCase() as Method);
-}
-
-/**
  * @ru Извлекает URL из объекта запроса или строки.
  * Поддерживает различные форматы: строка, объект с полем `url`, `_url`, или `scheme/host/path`.
  * @en Extracts URL from a request object or string.
@@ -173,6 +143,7 @@ export function normalizeUrl(req: unknown): string {
  * @param value - The header value to append.
  */
 function appendHeader(out: NormalizedHeaders, lowerKey: string, value: string): void {
+  value = value.replace(/[\r\n]/g, "");
   if (SINGLE_VALUE_HEADERS[lowerKey] === 1) {
     out[lowerKey] = value;
     return;
@@ -315,4 +286,59 @@ export function normalizeBody(
   body: RequestBodyData | undefined,
 ): RequestBodyData | undefined {
   return method === "GET" || method === "HEAD" ? undefined : body;
+}
+
+function getContentType(
+  headers: Record<string, string | string[]>,
+): string | undefined {
+  const ct = headers["content-type"];
+  if (typeof ct === "string") return ct;
+  if (Array.isArray(ct)) return ct[0];
+  return undefined;
+}
+
+/**
+ * @ru Сериализует тело запроса для транспорта: plain objects → JSON,
+ * URLSearchParams → string, pass-through для остальных типов.
+ * Мутирует headers, выставляя content-type если не задан.
+ * @en Serializes request body for transport: plain objects → JSON,
+ * URLSearchParams → string, pass-through for other types.
+ * Mutates headers, setting content-type if not already set.
+ * @param body - The request body to normalize.
+ * @param headers - The request headers (mutated in place).
+ * @returns The transport-ready body.
+ */
+export function normalizeBodyForTransport(
+  body: RequestBodyData,
+  headers: Record<string, string | string[]>,
+): RequestBodyData {
+  if (body == null) return body;
+
+  if (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) {
+    if (!getContentType(headers)) {
+      headers["content-type"] = "application/x-www-form-urlencoded";
+    }
+    return body.toString();
+  }
+
+  const isSerializableObject =
+    typeof body === "object" &&
+    body !== null &&
+    !(body instanceof Uint8Array) &&
+    !(body instanceof ArrayBuffer) &&
+    !(typeof ArrayBuffer !== "undefined" && ArrayBuffer.isView?.(body)) &&
+    !(typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) &&
+    !(typeof FormData !== "undefined" && body instanceof FormData) &&
+    !(typeof Blob !== "undefined" && body instanceof Blob) &&
+    !(typeof ReadableStream !== "undefined" && body instanceof ReadableStream) &&
+    !("pipe" in body && typeof (body as any).pipe === "function");
+
+  if (isSerializableObject) {
+    if (!getContentType(headers)) {
+      headers["content-type"] = "application/json";
+    }
+    return JSON.stringify(body);
+  }
+
+  return body;
 }

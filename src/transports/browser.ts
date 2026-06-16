@@ -83,8 +83,6 @@ export class BrowserTransport implements HyperTransport {
       throw new Error("Localhost URL detected in production environment");
     }
 
-    let body: unknown = req.body;
-
     const finalHeaders: Record<string, string> = Object.create(null);
     if (req.headers) {
       if (req.headers instanceof Headers) {
@@ -111,32 +109,10 @@ export class BrowserTransport implements HyperTransport {
       }
     }
 
-    if (body !== null && typeof body === "object") {
-      if (
-        body instanceof Uint8Array ||
-        body instanceof ArrayBuffer ||
-        ArrayBuffer.isView(body) ||
-        body instanceof ReadableStream ||
-        body instanceof URLSearchParams ||
-        body instanceof FormData ||
-        body instanceof Blob
-      ) {
-        //
-      } else {
-        const proto = Object.getPrototypeOf(body);
-        if (proto === Object.prototype || proto === null) {
-          body = JSON.stringify(body);
-          if (!finalHeaders["content-type"]) {
-            finalHeaders["content-type"] = "application/json";
-          }
-        }
-      }
-    }
-
     const res = await globalThis.fetch(fullUrl, {
       method: req.method,
       headers: finalHeaders as HeadersInit,
-      body: body as BodyInit | null,
+      body: req.body as BodyInit | null,
       signal: req.signal,
     });
 

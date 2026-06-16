@@ -22,74 +22,7 @@ interface FetchResponseLike {
   json(): Promise<unknown>;
 }
 
-/**
- * @ru Декларация глобального расширения ReadableStream для типов потребителей библиотеки.
- * @en Global declaration extending ReadableStream for library consumers' types.
- */
-declare global {
-  interface ReadableStream {
-    dump?(): Promise<void>;
-    arrayBuffer?(): Promise<ArrayBuffer>;
-    text?(): Promise<string>;
-    json?(): Promise<unknown>;
-    blob?(): Promise<Blob>;
-    bytes?(): Promise<Uint8Array>;
-  }
-}
 
-/**
- * @ru Флаг, предотвращающий повторный патчинг ReadableStream.
- * @en Flag to prevent repeated ReadableStream patching.
- */
-let streamPatched = false;
-
-/**
- * @ru Унифицирует ReadableStream во всех средах (Node.js, Bun, Deno, Browser),
- * добавляя методы парсинга (text, json, blob и т.д.) через оптимизированный Response API.
- * @en Unifies ReadableStream across all environments (Node.js, Bun, Deno, Browser)
- * by adding parsing methods (text, json, blob, etc.) via the optimized Response API.
- */
-const patchReadableStream = (): void => {
-  if (streamPatched || typeof ReadableStream === "undefined") return;
-  streamPatched = true;
-
-  const proto = ReadableStream.prototype as unknown as Record<string, unknown>;
-
-  const methods = {
-    dump: async function (this: ReadableStream) {
-      return this.cancel().catch(() => {});
-    },
-    arrayBuffer: async function (this: ReadableStream) {
-      return new Response(this as unknown as BodyInit).arrayBuffer();
-    },
-    text: async function (this: ReadableStream) {
-      return new Response(this as unknown as BodyInit).text();
-    },
-    json: async function (this: ReadableStream) {
-      return new Response(this as unknown as BodyInit).json();
-    },
-    blob: async function (this: ReadableStream) {
-      return new Response(this as unknown as BodyInit).blob();
-    },
-    bytes: async function (this: ReadableStream) {
-      const buf = await new Response(this as unknown as BodyInit).arrayBuffer();
-      return new Uint8Array(buf);
-    },
-  } as const;
-
-  for (const [name, fn] of Object.entries(methods)) {
-    if (typeof proto[name] !== "function") {
-      Object.defineProperty(proto, name, {
-        value: fn,
-        writable: true,
-        configurable: true,
-        enumerable: true,
-      });
-    }
-  }
-};
-
-patchReadableStream();
 
 const TEXT_CACHE = Symbol("hyperttp.textCache");
 const JSON_CACHE = Symbol("hyperttp.jsonCache");
@@ -242,6 +175,25 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       return;
     }
 
+    if (this._raw && body === this._raw.body && typeof this._raw.arrayBuffer === "function") {
+      const buf = await this._raw.arrayBuffer();
+      this[ARRAY_BUFFER_CACHE] = buf;
+      this[TEXT_CACHE] = STATIC_DECODER.decode(buf);
+      this.body = new Uint8Array(buf) as T | HyperBody | Uint8Array | null;
+      return;
+    }
+
+    if (CURRENT_RUNTIME === "bun" && body && typeof body === "object" && "arrayBuffer" in body) {
+      const bunBody = body as { arrayBuffer: () => Promise<ArrayBuffer> };
+      if (typeof bunBody.arrayBuffer === "function") {
+        const buf = await bunBody.arrayBuffer();
+        this[ARRAY_BUFFER_CACHE] = buf;
+        this[TEXT_CACHE] = STATIC_DECODER.decode(buf);
+        this.body = new Uint8Array(buf) as T | HyperBody | Uint8Array | null;
+        return;
+      }
+    }
+
     if (isReadableStream(body) || isBlob(body)) {
       if (isReadableStream(body) && body.locked) {
         throw new Error("[Hyperttp] Stream is locked.");
@@ -250,14 +202,7 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       const buf = await response.arrayBuffer();
       this[ARRAY_BUFFER_CACHE] = buf;
       this[TEXT_CACHE] = STATIC_DECODER.decode(buf);
-    }
-
-    if (this[ARRAY_BUFFER_CACHE]) {
-      this.body = new Uint8Array(this[ARRAY_BUFFER_CACHE] as ArrayBuffer) as
-        | T
-        | HyperBody
-        | Uint8Array
-        | null;
+      this.body = new Uint8Array(buf) as T | HyperBody | Uint8Array | null;
     }
   }
 
@@ -271,6 +216,7 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
 
     const body = this.body;
     if (body instanceof Uint8Array) {
+      this._bodyConsumed = true;
       return (this[ARRAY_BUFFER_CACHE] =
         body.buffer.byteLength === body.byteLength
           ? body.buffer
@@ -278,27 +224,19 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
     }
 
     if (body instanceof ArrayBuffer) {
+      this._bodyConsumed = true;
       return (this[ARRAY_BUFFER_CACHE] = body);
     }
 
-    if (this._raw && body === this._raw.body && typeof this._raw.arrayBuffer === "function") {
-      this._bodyConsumed = true;
-      return (this[ARRAY_BUFFER_CACHE] = await this._raw.arrayBuffer());
-    }
-
-    if (CURRENT_RUNTIME === "bun" && body && typeof body === "object" && "arrayBuffer" in body) {
-      const bunBody = body as { arrayBuffer: () => Promise<ArrayBuffer> };
-      if (typeof bunBody.arrayBuffer === "function") {
-        this._bodyConsumed = true;
-        return (this[ARRAY_BUFFER_CACHE] = await bunBody.arrayBuffer());
-      }
-    }
-
     if (isBlob(body)) {
+      this._bodyConsumed = true;
       return (this[ARRAY_BUFFER_CACHE] = await body.arrayBuffer());
     }
 
     await this._consumeBody();
+    if (this[ARRAY_BUFFER_CACHE] === undefined) {
+      throw new Error("[Hyperttp] Response body is not available as ArrayBuffer");
+    }
     return this[ARRAY_BUFFER_CACHE]!;
   }
 
@@ -326,25 +264,15 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       return (this[TEXT_CACHE] = STATIC_DECODER.decode(body));
     }
 
-    if (this._raw && body === this._raw.body && typeof this._raw.text === "function") {
-      this._bodyConsumed = true;
-      return (this[TEXT_CACHE] = await this._raw.text());
-    }
-
-    if (CURRENT_RUNTIME === "bun" && body && typeof body === "object" && "text" in body) {
-      const bunBody = body as { text: () => Promise<string> };
-      if (typeof bunBody.text === "function") {
-        this._bodyConsumed = true;
-        return (this[TEXT_CACHE] = await bunBody.text());
-      }
-    }
-
     if (isBlob(body)) {
       this._bodyConsumed = true;
       return (this[TEXT_CACHE] = await body.text());
     }
 
     await this._consumeBody();
+    if (this[TEXT_CACHE] === undefined) {
+      throw new Error("[Hyperttp] Response body is not available as text");
+    }
     return this[TEXT_CACHE]!;
   }
 
@@ -370,24 +298,15 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       !(body instanceof Uint8Array) &&
       !(body instanceof ArrayBuffer)
     ) {
+      this._bodyConsumed = true;
       return (this[JSON_CACHE] = body) as TJson;
     }
 
-    if (this._raw && body === this._raw.body && typeof this._raw.json === "function") {
-      this._bodyConsumed = true;
-      return (this[JSON_CACHE] = await this._raw.json()) as TJson;
+    await this._consumeBody();
+    if (this[TEXT_CACHE] !== undefined) {
+      return (this[JSON_CACHE] = JSON.parse(this[TEXT_CACHE]!)) as TJson;
     }
-
-    if (CURRENT_RUNTIME === "bun" && body && typeof body === "object" && "json" in body) {
-      const bunBody = body as { json: () => Promise<unknown> };
-      if (typeof bunBody.json === "function") {
-        this._bodyConsumed = true;
-        return (this[JSON_CACHE] = await bunBody.json()) as TJson;
-      }
-    }
-
-    const str = await this.text();
-    return (this[JSON_CACHE] = JSON.parse(str)) as TJson;
+    throw new Error("[Hyperttp] Response body is not available as JSON");
   }
 
   /**

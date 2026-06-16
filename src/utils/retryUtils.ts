@@ -52,8 +52,8 @@ export async function drainBody(body: unknown): Promise<void> {
  */
 export function shouldRetry(status: number, retryOptions: RetryOptions): boolean {
   const codes = retryOptions.retryStatusCodes;
-  if (codes !== undefined && codes.length > 0) {
-    return codes.includes(status);
+  if (codes !== undefined) {
+    return codes.length > 0 && codes.includes(status);
   }
   return DEFAULT_RETRY_STATUS_CODES.has(status);
 }

@@ -10,7 +10,7 @@ import type {
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import tls from "node:tls";
 import zlib from "node:zlib";
 
@@ -150,53 +150,25 @@ function applyStealthHeaders(
 }
 
 /**
- * @ru Кэш HTTP/HTTPS агентов по ключу (протокол + stealth-конфигурация).
- * @en Cache of HTTP/HTTPS agents by key (protocol + stealth configuration).
- */
-const agentCache = new Map<string, http.Agent | https.Agent>();
-
-/**
- * @ru Устанавливает метод dump() на прототип ReadableStream для освобождения ресурсов.
- * @en Installs dump() method on ReadableStream prototype for resource cleanup.
- */
-function installReadableStreamDump(): void {
-  if (typeof ReadableStream === "undefined") return;
-
-  const proto = ReadableStream.prototype as ReadableStream & {
-    dump?: () => Promise<void>;
-  };
-
-  if (typeof proto.dump === "function") return;
-
-  Object.defineProperty(proto, "dump", {
-    value: async function (this: ReadableStream) {
-      try {
-        return await this.cancel();
-      } catch {
-        //
-      }
-    },
-    writable: true,
-    configurable: true,
-  });
-}
-
-/**
- * @ru Получает или создаёт нативный HTTP/HTTPS агент с учётом stealth-настроек.
- * @en Gets or creates a native HTTP/HTTPS agent considering stealth settings.
+ * @ru Создаёт нативный HTTP/HTTPS агент с учётом stealth-настроек.
+ * @en Creates a native HTTP/HTTPS agent considering stealth settings.
  * @param isHttps - Whether the connection is HTTPS.
  * @param stealth - Optional stealth configuration.
+ * @param cache - The agent cache map to use (per-instance).
  * @returns The HTTP or HTTPS agent.
  */
 function getNativeAgent(
   isHttps: boolean,
   stealth: StealthOptions | undefined,
+  cache: Map<string, http.Agent | https.Agent>,
+  rejectUnauthorized?: boolean,
 ): http.Agent | https.Agent {
   const fingerprint = stealth?.fingerprint ?? "none";
   const fragment = stealth?.fragment ?? "none";
-  const cacheKey = `${isHttps ? "https" : "http"}:${fingerprint}:${fragment}`;
+  const needHttp2 = stealth?.http2 === true;
+  const cacheKey = `${isHttps ? "https" : "http"}:${fingerprint}:${fragment}:${needHttp2 ? "h2" : "1.1"}`;
 
-  let agent = agentCache.get(cacheKey);
+  let agent = cache.get(cacheKey);
   if (agent) return agent;
 
   const agentOpts: any = {
@@ -204,87 +176,115 @@ function getNativeAgent(
     maxSockets: 256,
   };
 
+  if (rejectUnauthorized !== undefined) {
+    agentOpts.rejectUnauthorized = rejectUnauthorized;
+  }
+
   if (isHttps) {
     agentOpts.ciphers = getCiphersForProfile(stealth?.fingerprint);
 
-    if (stealth?.fragment === "split") {
+    const needCustomConnect = fragment === "split" || needHttp2;
+
+    if (needCustomConnect) {
+      const alpnProtocols: string[] | undefined = needHttp2 ? ["h2", "http/1.1"] : undefined;
+
       agentOpts.createConnection = (
         options: any,
         callback: (err: Error | null, socket?: any) => void,
       ) => {
-        const socket = net.connect(options);
-        const originalWrite = socket.write;
-        let isFirstWrite = true;
+        let alpnFallback = false;
 
-        socket.write = function (
-          this: net.Socket,
-          chunk: Uint8Array | string,
-          encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
-          cb?: (err?: Error | null) => void,
-        ): boolean {
-          if (isFirstWrite && chunk instanceof Uint8Array && chunk.length > 5) {
-            isFirstWrite = false;
-            this.write = originalWrite;
+        const createTlsConnection = (
+          alpn: string[] | undefined,
+          cb: (err: Error | null, socket?: any) => void,
+        ) => {
+          const socket = net.connect(options);
 
-            let encoding: BufferEncoding | undefined;
-            let callbackRef: ((err?: Error | null) => void) | undefined;
+          if (fragment === "split") {
+            const originalWrite = socket.write;
+            let isFirstWrite = true;
 
-            if (typeof encodingOrCb === "function") {
-              callbackRef = encodingOrCb;
-            } else {
-              encoding = encodingOrCb;
-              callbackRef = cb;
-            }
+            socket.write = function (
+              this: net.Socket,
+              chunk: Uint8Array | string,
+              encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
+              cb?: (err?: Error | null) => void,
+            ): boolean {
+              if (isFirstWrite && chunk instanceof Uint8Array && chunk.length > 5) {
+                isFirstWrite = false;
+                this.write = originalWrite;
 
-            const part1 = chunk.subarray(0, 3);
-            const part2 = chunk.subarray(3);
+                let encoding: BufferEncoding | undefined;
+                let callbackRef: ((err?: Error | null) => void) | undefined;
 
-            originalWrite.call(this, part1, encoding);
-            return originalWrite.call(this, part2, encoding, callbackRef);
+                if (typeof encodingOrCb === "function") {
+                  callbackRef = encodingOrCb;
+                } else {
+                  encoding = encodingOrCb;
+                  callbackRef = cb;
+                }
+
+                const part1 = chunk.subarray(0, 3);
+                const part2 = chunk.subarray(3);
+
+                const onError = (err: Error) => {
+                  callbackRef?.(err);
+                };
+
+                try {
+                  originalWrite.call(this, part1, encoding);
+                } catch (err) {
+                  onError(err as Error);
+                  return false;
+                }
+                return originalWrite.call(this, part2, encoding, callbackRef);
+              }
+
+              this.write = originalWrite;
+              return originalWrite.call(this, chunk, encodingOrCb as any, cb as any);
+            } as any;
           }
 
-          this.write = originalWrite;
-          return originalWrite.call(this, chunk, encodingOrCb as any, cb as any);
-        } as any;
+          const tlsOpts: any = {
+            ...options,
+            socket,
+            ciphers: agentOpts.ciphers,
+          };
+          if (alpn) tlsOpts.ALPNProtocols = alpn;
 
-        const tlsSocket = tls.connect({
-          ...options,
-          socket,
-          ciphers: agentOpts.ciphers,
-        });
+          const tlsSocket = tls.connect(tlsOpts);
 
-        tlsSocket.once("secureConnect", () => callback(null, tlsSocket));
-        tlsSocket.once("error", (err) => callback(err));
-        return tlsSocket;
+          tlsSocket.once("secureConnect", () => {
+            if (alpn && tlsSocket.alpnProtocol === "h2" && !alpnFallback) {
+              alpnFallback = true;
+              tlsSocket.destroy();
+              createTlsConnection(["http/1.1"], cb);
+              return;
+            }
+            cb(null, tlsSocket);
+          });
+          tlsSocket.once("error", (err) => cb(err));
+        };
+
+        return createTlsConnection(alpnProtocols, callback);
       };
     }
+
     agent = new https.Agent(agentOpts);
   } else {
-    if (stealth?.fragment === "split") {
-      agentOpts.createConnection = (
-        options: any,
-        callback: (err: Error | null, socket?: any) => void,
-      ) => {
-        const socket = net.connect(options);
-        socket.once("connect", () => callback(null, socket));
-        socket.once("error", (err) => callback(err));
-        return socket;
-      };
-    }
     agent = new http.Agent(agentOpts);
   }
 
-  agentCache.set(cacheKey, agent);
+  cache.set(cacheKey, agent);
   return agent;
 }
-
-installReadableStreamDump();
 
 function isAbsoluteHttpUrl(url: string): boolean {
   return url.startsWith("http://") || url.startsWith("https://");
 }
 
 function resolveUrl(baseUrl: string, url: string): string {
+  if (!url) throw new Error("URL is empty");
   if (isAbsoluteHttpUrl(url)) return url;
   return url.charCodeAt(0) === 47 ? baseUrl + url : baseUrl + "/" + url;
 }
@@ -338,24 +338,18 @@ function normalizeHeaders(headers: TransportRequest["headers"]): Record<string, 
   return out;
 }
 
-function normalizeBody(body: TransportRequest["body"]): any {
-  if (body === undefined || body === null) return undefined;
-
-  if (
-    typeof body === "string" ||
-    body instanceof Uint8Array ||
-    body instanceof ArrayBuffer ||
-    ArrayBuffer.isView(body) ||
-    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream)
-  ) {
-    return body;
-  }
-
-  if (typeof body === "object") {
-    return JSON.stringify(body);
-  }
-
-  return String(body);
+function createSizeLimitTransform(maxBytes: number): Transform {
+  let total = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      total += chunk.length;
+      if (total > maxBytes) {
+        callback(new Error(`[Hyperttp] Response size exceeded limit of ${maxBytes} bytes`));
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
 }
 
 /**
@@ -366,6 +360,7 @@ export class NodeTransport implements HyperTransport {
   public config: NodeTransportConfig;
   private readonly isProduction: boolean;
   private readonly cleanBaseUrl: string;
+  private readonly agentCache = new Map<string, http.Agent | https.Agent>();
 
   constructor(config: NodeTransportConfig) {
     this.config = config;
@@ -393,10 +388,10 @@ export class NodeTransport implements HyperTransport {
       headers = applyStealthHeaders(headers, stealthOpts);
     }
 
-    const body = normalizeBody(req.body);
+    const body = req.body;
     const urlObj = new URL(fullUrl);
     const isHttps = urlObj.protocol === "https:";
-    const agent = getNativeAgent(isHttps, stealthOpts);
+    const agent = getNativeAgent(isHttps, stealthOpts, this.agentCache, this.config.network?.rejectUnauthorized);
 
     return new Promise((resolve, reject) => {
       const reqOpts: http.RequestOptions | https.RequestOptions = {
@@ -405,6 +400,8 @@ export class NodeTransport implements HyperTransport {
         agent,
         signal: req.signal,
       };
+
+      let settled = false;
 
       const clientReq = (isHttps ? https : http).request(fullUrl, reqOpts, (res) => {
         const resHeaders: Record<string, string> = Object.create(null);
@@ -419,28 +416,60 @@ export class NodeTransport implements HyperTransport {
         const encoding = resHeaders["content-encoding"]?.toLowerCase();
 
         if (encoding === "gzip") {
-          responseStream = res.pipe(zlib.createGunzip());
+          const gunzip = zlib.createGunzip();
+          gunzip.on("error", (err) => {
+            res.destroy(err);
+            if (!settled) reject(err);
+          });
+          responseStream = res.pipe(gunzip);
           delete resHeaders["content-encoding"];
           delete resHeaders["content-length"];
         } else if (encoding === "deflate") {
-          responseStream = res.pipe(zlib.createInflate());
+          const inflate = zlib.createInflate();
+          inflate.on("error", (err) => {
+            res.destroy(err);
+            if (!settled) reject(err);
+          });
+          responseStream = res.pipe(inflate);
           delete resHeaders["content-encoding"];
           delete resHeaders["content-length"];
         } else if (encoding === "br") {
-          responseStream = res.pipe(zlib.createBrotliDecompress());
+          const brotli = zlib.createBrotliDecompress();
+          brotli.on("error", (err) => {
+            res.destroy(err);
+            if (!settled) reject(err);
+          });
+          responseStream = res.pipe(brotli);
           delete resHeaders["content-encoding"];
           delete resHeaders["content-length"];
         }
 
+        const maxBytes = this.config.network?.maxResponseBytes;
+        if (maxBytes != null && maxBytes > 0) {
+          const limiter = createSizeLimitTransform(maxBytes);
+          limiter.on("error", (err) => {
+            res.destroy(err);
+            if (!settled) reject(err);
+          });
+          responseStream = responseStream.pipe(limiter);
+        }
+
+        responseStream.on("error", (err) => {
+          if (!settled) reject(err);
+        });
+
+        settled = true;
         resolve({
           status: res.statusCode ?? 200,
           headers: resHeaders,
           url: fullUrl,
-          body: Readable.toWeb(responseStream) as TransportResponsePayload,
+          body: Readable.toWeb(responseStream) as unknown as TransportResponsePayload,
         });
       });
 
-      clientReq.on("error", (err) => reject(err));
+      clientReq.on("error", (err) => {
+        if (!settled) reject(err);
+      });
 
       if (body !== undefined && body !== null) {
         if (typeof body === "string" || body instanceof Uint8Array || ArrayBuffer.isView(body)) {
@@ -461,13 +490,16 @@ export class NodeTransport implements HyperTransport {
   }
 
   public async close(): Promise<void> {
-    for (const agent of agentCache.values()) {
+    for (const agent of this.agentCache.values()) {
       agent.destroy();
     }
-    agentCache.clear();
+    this.agentCache.clear();
   }
 
   public async destroy(): Promise<void> {
-    await this.close();
+    for (const agent of this.agentCache.values()) {
+      agent.destroy();
+    }
+    this.agentCache.clear();
   }
 }
