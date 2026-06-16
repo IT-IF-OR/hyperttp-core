@@ -11,6 +11,7 @@ import type {
   StreamResponse,
   RequestBodyData,
   Method,
+  ResponseType,
 } from "@hyperttp/types";
 import { defaultConfig } from "../defaultConfig.js";
 import { mapResponseFast, mapStreamFast, mergeHeadersFast } from "../utils/response.js";
@@ -73,7 +74,14 @@ export class HyperCore implements IHyperCore {
     this.config = {
       ...defaultConfig,
       ...config,
-      network: { ...defaultConfig.network, ...config.network },
+      network: {
+        ...defaultConfig.network,
+        ...config.network,
+        stealth:
+          config.network?.stealth || defaultConfig.network?.stealth
+            ? Object.assign({}, defaultConfig.network?.stealth, config.network?.stealth)
+            : undefined,
+      },
     };
     this.transportManager = new TransportManager(this.config, transport);
     this.transportReady = this.transportManager.getSync()
@@ -121,17 +129,22 @@ export class HyperCore implements IHyperCore {
         }
       }
 
-      const transport = this.transportManager.getSync() ?? (await this.transportReady);
+      const transport =
+        this.transportManager.transport ??
+        this.transportManager.getSync() ??
+        (await this.transportReady);
 
       const networkStart = performance.now();
       let rawResponse = await transport.execute(req as TransportArgs);
       const networkMs = performance.now() - networkStart;
 
-      const meta = (req.meta ??= {}) as {
-        responseType?: string;
-        timings?: { networkMs?: number; serializationMs?: number };
+      const meta = req.meta as {
+        responseType?: ResponseType;
+        timings?: { networkMs?: number };
       };
-      meta.timings = { ...meta.timings, networkMs };
+      if (meta.timings) {
+        meta.timings.networkMs = networkMs;
+      }
 
       if (this.hasResponseDataPlugins) {
         const syncResult = executeResponseDataPipeline(
@@ -143,16 +156,25 @@ export class HyperCore implements IHyperCore {
       }
 
       const response =
-        req.meta?.responseType === "stream"
-          ? mapStreamFast(rawResponse)
-          : mapResponseFast(rawResponse);
+        meta.responseType === "stream" ? mapStreamFast(rawResponse) : mapResponseFast(rawResponse);
 
       if (this.hasResponsePlugins) {
+        const reqForPipeline =
+          this.pipelines.responseSideEffects.length > 0
+            ? {
+                ...req,
+                meta: {
+                  ...meta,
+                  timings: meta.timings ? { ...meta.timings } : undefined,
+                },
+              }
+            : req;
+
         const syncResult = executeResponsePipeline(
           this.pipelines.responseMutators,
           this.pipelines.responseSideEffects,
           response as HttpResponse,
-          req,
+          reqForPipeline,
           this.pluginCtx,
           this.config.logger,
         );
@@ -360,7 +382,14 @@ export class HyperCore implements IHyperCore {
       {
         ...this.config,
         ...options,
-        network: { ...this.config.network, ...options.network },
+        network: {
+          ...this.config.network,
+          ...options.network,
+          stealth:
+            options.network?.stealth || this.config.network?.stealth
+              ? { ...this.config.network?.stealth, ...options.network?.stealth }
+              : undefined,
+        },
       },
       this.transportManager.transport ?? undefined,
     );
@@ -394,11 +423,11 @@ export class HyperCore implements IHyperCore {
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the parsed JSON data.
    */
-  public async json<T = unknown>(req: RequestInterface | string, signal?: AbortSignal): Promise<T> {
-    return (
-      (await this.shortcut(req, signal)).json?.<T>() ??
-      Promise.reject(new Error("json() not supported"))
-    );
+  public json<T = unknown>(req: RequestInterface | string, signal?: AbortSignal): Promise<T> {
+    return this.shortcut(req, signal).then((res) => {
+      if (res.json) return res.json<T>();
+      throw new Error("json() not supported");
+    });
   }
 
   /**
@@ -408,11 +437,11 @@ export class HyperCore implements IHyperCore {
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the response text.
    */
-  public async text(req: RequestInterface | string, signal?: AbortSignal): Promise<string> {
-    return (
-      (await this.shortcut(req, signal)).text?.() ??
-      Promise.reject(new Error("text() not supported"))
-    );
+  public text(req: RequestInterface | string, signal?: AbortSignal): Promise<string> {
+    return this.shortcut(req, signal).then((res) => {
+      if (res.text) return res.text();
+      throw new Error("text() not supported");
+    });
   }
 
   /**
@@ -422,8 +451,10 @@ export class HyperCore implements IHyperCore {
    * @param signal - Optional abort signal.
    * @returns Promise that resolves when the stream is drained.
    */
-  public async dump(req: RequestInterface | string, signal?: AbortSignal): Promise<void> {
-    await (await this.shortcut(req, signal)).dump?.();
+  public dump(req: RequestInterface | string, signal?: AbortSignal): Promise<void> {
+    return this.shortcut(req, signal).then((res) => {
+      if (res.dump) return res.dump();
+    });
   }
 
   /**
@@ -448,11 +479,23 @@ export class HyperCore implements IHyperCore {
         );
         if (recovered != null) {
           if (this.hasResponsePlugins) {
+            const meta = req.meta;
+            const reqForPipeline =
+              this.pipelines.responseSideEffects.length > 0
+                ? {
+                    ...req,
+                    meta: {
+                      ...meta,
+                      timings: meta?.timings ? { ...meta.timings } : undefined,
+                    },
+                  }
+                : req;
+
             const syncResult = executeResponsePipeline(
               this.pipelines.responseMutators,
               this.pipelines.responseSideEffects,
               recovered as HttpResponse,
-              req,
+              reqForPipeline,
               this.pluginCtx,
               this.config.logger,
             );
@@ -493,52 +536,103 @@ export class HyperCore implements IHyperCore {
       headers: this.defaultHeaders,
       body: undefined,
       signal: undefined,
-      meta: undefined,
+      meta: {
+        responseType: undefined as ResponseType | undefined,
+        timings: {
+          networkMs: undefined as number | undefined,
+        },
+      },
+      stealth: undefined,
+    };
+
+    const metaObj = internalReq.meta as {
+      responseType: ResponseType | undefined;
+      timings: {
+        networkMs: number | undefined;
+      };
     };
 
     if (typeof req === "string") {
       internalReq.method = method;
       internalReq.url = this.resolveUrl(req);
-      internalReq.headers = this.defaultHeaders;
+      internalReq.headers = this.hasRequestPlugins
+        ? { ...this.defaultHeaders }
+        : this.defaultHeaders;
       internalReq.body = body !== undefined ? normalizeBody(method, body) : undefined;
       internalReq.signal = signal;
-      internalReq.meta = responseType ? { responseType } : undefined;
+
+      metaObj.responseType = responseType;
+
+      internalReq.stealth = this.config.network?.stealth;
       return internalReq;
     }
 
     const rawUrl = normalizeUrl(req);
     if (!rawUrl) throw new Error(`[HyperCore] URL is undefined for ${method}`);
 
-    let finalUrl = urlCache[rawUrl];
-    if (!finalUrl) {
-      const urlObj = new URL(rawUrl);
-      if (req.query) this.appendQueryParams(urlObj, req.query);
-      finalUrl = urlObj.href;
+    let finalUrl: string;
 
-      if (urlCacheCount >= MAX_CACHE_SIZE) {
-        urlCache = Object.create(null);
-        urlCacheCount = 0;
+    if (req.query) {
+      const cacheKey = rawUrl + "_base";
+      let baseUrl = urlCache[cacheKey];
+
+      if (!baseUrl) {
+        baseUrl = this.config.baseURL
+          ? new URL(rawUrl, this.config.baseURL).href
+          : new URL(rawUrl).href;
+
+        this.ensureCacheSpace();
+        urlCache[cacheKey] = baseUrl;
+        urlCacheCount++;
       }
-      urlCache[rawUrl] = finalUrl;
-      urlCacheCount++;
+
+      const urlObj = new URL(baseUrl);
+      this.appendQueryParams(urlObj, req.query);
+      finalUrl = urlObj.href;
+    } else {
+      let cachedUrl = urlCache[rawUrl];
+      if (!cachedUrl) {
+        cachedUrl = this.config.baseURL
+          ? new URL(rawUrl, this.config.baseURL).href
+          : new URL(rawUrl).href;
+
+        if (urlCacheCount >= MAX_CACHE_SIZE) {
+          urlCache = Object.create(null);
+          urlCacheCount = 0;
+        }
+        urlCache[rawUrl] = cachedUrl;
+        urlCacheCount++;
+      }
+      finalUrl = cachedUrl;
     }
 
     internalReq.method = method;
     internalReq.url = finalUrl;
     internalReq.headers = req.headers
       ? mergeHeadersFast(this.defaultHeaders, req.headers)
-      : this.defaultHeaders;
+      : { ...this.defaultHeaders };
     internalReq.body = normalizeBody(method, req.body ?? body);
     internalReq.signal = req.signal ?? signal;
-    internalReq.meta = responseType
-      ? { responseType }
-      : req.meta
-        ? {
-            responseType: (req.meta as { responseType?: "stream" }).responseType,
-          }
-        : undefined;
+
+    metaObj.responseType =
+      responseType ?? (req.meta as { responseType?: ResponseType })?.responseType;
+
+    if (req.stealth) {
+      internalReq.stealth = this.config.network?.stealth
+        ? { ...this.config.network.stealth, ...req.stealth }
+        : req.stealth;
+    } else {
+      internalReq.stealth = this.config.network?.stealth;
+    }
 
     return internalReq;
+  }
+
+  private ensureCacheSpace(): void {
+    if (urlCacheCount >= MAX_CACHE_SIZE) {
+      urlCache = Object.create(null);
+      urlCacheCount = 0;
+    }
   }
 
   /**
@@ -548,10 +642,23 @@ export class HyperCore implements IHyperCore {
    */
   private recycleRequest(req: InternalRequest): void {
     if (requestPool.length < MAX_POOL_SIZE) {
+      req.method = "GET";
       req.url = "";
+      req.headers = this.defaultHeaders;
       req.body = undefined;
       req.signal = undefined;
-      req.meta = undefined;
+      req.stealth = undefined;
+
+      const m = req.meta;
+      if (m) {
+        m.responseType = undefined;
+        if (m.timings) {
+          for (const key in m.timings) {
+            (m.timings as any)[key] = undefined;
+          }
+        }
+      }
+
       requestPool.push(req);
     }
   }
@@ -568,10 +675,13 @@ export class HyperCore implements IHyperCore {
     let finalUrl = urlCache[url];
     if (finalUrl) return finalUrl;
 
-    const hasQuery = url.includes("?") || url.endsWith("?");
     const isAbsolute = url.startsWith("http://") || url.startsWith("https://");
 
-    finalUrl = !hasQuery || !isAbsolute ? new URL(url).href : url;
+    if (isAbsolute && !url.includes("?")) {
+      finalUrl = url;
+    } else {
+      finalUrl = this.config.baseURL ? new URL(url, this.config.baseURL).href : new URL(url).href;
+    }
 
     if (urlCacheCount >= MAX_CACHE_SIZE) {
       urlCache = Object.create(null);
@@ -584,7 +694,7 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Добавляет query-параметры к объекту URL, поддерживая массивы значений.
+   * @ru Добавляет query-параметры к объект URL, поддерживая массивы значений.
    * @en Appends query parameters to the URL object, supporting arrays of values.
    * @param url - The URL object to modify.
    * @param query - Record of query parameter key-value pairs.

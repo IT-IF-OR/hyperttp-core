@@ -1,17 +1,164 @@
 import type {
+  Fingerprint,
   HttpClientOptions,
   HyperTransport,
+  StealthOptions,
   TransportRequest,
   TransportResponse,
   TransportResponsePayload,
 } from "@hyperttp/types";
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
+import { Readable } from "node:stream";
+import tls from "node:tls";
+import zlib from "node:zlib";
 
+/**
+ * @ru Конфигурация транспорта для Node.js с использованием нативных http/https модулей.
+ * @en Node.js transport configuration using native http/https modules.
+ */
 export interface NodeTransportConfig extends HttpClientOptions {
+  /**
+   * @ru Базовый URL для относительных путей.
+   * @en Base URL for relative paths.
+   */
   baseUrl?: string;
+  /**
+   * @ru Настройки stealth-маскировки на уровне транспорта.
+   * @en Stealth masking settings at the transport level.
+   */
+  stealth?: StealthOptions;
 }
 
-const fetchFn: typeof globalThis.fetch = globalThis.fetch;
+/**
+ * @ru Статические пресеты браузерных заголовков для маскировки под реальных пользователей.
+ * Используются stealth-режимом для обхода fingerprint-защит.
+ * @en Static presets of browser headers for masking as real users.
+ * Used by stealth mode to bypass fingerprint protections.
+ */
+const STEALTH_HEADER_PRESETS: Record<string, Record<string, string>> = {
+  chrome: {
+    "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Linux"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+    "accept-language": "en-US,en;q=0.9",
+  },
+  firefox: {
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "accept-language": "en-US,en;q=0.5",
+    "upgrade-insecure-requests": "1",
+  },
+};
 
+/**
+ * @ru Пресеты User-Agent, соответствующие TLS-отпечаткам (JA3/JA4).
+ * @en User-Agent presets matching the TLS fingerprints (JA3/JA4).
+ */
+const STEALTH_UA_PRESETS: Record<string, string> = {
+  chrome:
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+  firefox: "Mozilla/5.0 (X11; Linux; rv:126.0) Gecko/20100101 Firefox/126.0",
+  safari:
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+  edge: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+};
+
+/**
+ * @ru Возвращает строку шифров TLS для указанного профиля браузера.
+ * @en Returns the TLS cipher suite string for the specified browser profile.
+ * @param fingerprint - Browser fingerprint profile.
+ * @returns Colon-separated cipher suite string, or empty string if not found.
+ */
+function getCiphersForProfile(fingerprint: Fingerprint | undefined): string {
+  if (!fingerprint) return "";
+
+  switch (fingerprint) {
+    case "chrome":
+    case "edge":
+      return [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
+      ].join(":");
+
+    case "firefox":
+      return [
+        "TLS_AES_128_GCM_SHA256",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "TLS_AES_256_GCM_SHA384",
+        "ECDHE-ECDSA-AES128-GCM-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
+      ].join(":");
+
+    case "safari":
+      return [
+        "TLS_AES_256_GCM_SHA384",
+        "TLS_CHACHA20_POLY1305_SHA256",
+        "TLS_AES_128_GCM_SHA256",
+        "ECDHE-ECDSA-AES256-GCM-SHA384",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+      ].join(":");
+
+    default:
+      return "";
+  }
+}
+
+/**
+ * @ru Безопасно применяет стелс-пресеты, отдавая абсолютный приоритет ручным заголовкам.
+ * @en Safely applies stealth presets, giving absolute priority to manual headers.
+ * @param headers - The headers object to modify.
+ * @param stealth - Stealth configuration options.
+ * @returns The modified headers object.
+ */
+function applyStealthHeaders(
+  headers: Record<string, string>,
+  stealth: StealthOptions,
+): Record<string, string> {
+  if (!stealth || !stealth.fingerprint) return headers;
+
+  const presetName = stealth.fingerprint;
+  const presetHeaders = STEALTH_HEADER_PRESETS[presetName];
+
+  if (presetHeaders) {
+    for (const key in presetHeaders) {
+      if (headers[key] === undefined) {
+        headers[key] = presetHeaders[key]!;
+      }
+    }
+  }
+
+  const currentUA = headers["user-agent"];
+  if (currentUA === undefined || currentUA === "hyperttp/2.0" || currentUA === "Hyperttp/2.0") {
+    const browserUA = STEALTH_UA_PRESETS[presetName];
+    if (browserUA) {
+      headers["user-agent"] = browserUA;
+    }
+  }
+
+  return headers;
+}
+
+/**
+ * @ru Кэш HTTP/HTTPS агентов по ключу (протокол + stealth-конфигурация).
+ * @en Cache of HTTP/HTTPS agents by key (protocol + stealth configuration).
+ */
+const agentCache = new Map<string, http.Agent | https.Agent>();
+
+/**
+ * @ru Устанавливает метод dump() на прототип ReadableStream для освобождения ресурсов.
+ * @en Installs dump() method on ReadableStream prototype for resource cleanup.
+ */
 function installReadableStreamDump(): void {
   if (typeof ReadableStream === "undefined") return;
 
@@ -22,7 +169,7 @@ function installReadableStreamDump(): void {
   if (typeof proto.dump === "function") return;
 
   Object.defineProperty(proto, "dump", {
-    value: async function () {
+    value: async function (this: ReadableStream) {
       try {
         return await this.cancel();
       } catch {
@@ -32,6 +179,103 @@ function installReadableStreamDump(): void {
     writable: true,
     configurable: true,
   });
+}
+
+/**
+ * @ru Получает или создаёт нативный HTTP/HTTPS агент с учётом stealth-настроек.
+ * @en Gets or creates a native HTTP/HTTPS agent considering stealth settings.
+ * @param isHttps - Whether the connection is HTTPS.
+ * @param stealth - Optional stealth configuration.
+ * @returns The HTTP or HTTPS agent.
+ */
+function getNativeAgent(
+  isHttps: boolean,
+  stealth: StealthOptions | undefined,
+): http.Agent | https.Agent {
+  const fingerprint = stealth?.fingerprint ?? "none";
+  const fragment = stealth?.fragment ?? "none";
+  const cacheKey = `${isHttps ? "https" : "http"}:${fingerprint}:${fragment}`;
+
+  let agent = agentCache.get(cacheKey);
+  if (agent) return agent;
+
+  const agentOpts: any = {
+    keepAlive: true,
+    maxSockets: 256,
+  };
+
+  if (isHttps) {
+    agentOpts.ciphers = getCiphersForProfile(stealth?.fingerprint);
+
+    if (stealth?.fragment === "split") {
+      agentOpts.createConnection = (
+        options: any,
+        callback: (err: Error | null, socket?: any) => void,
+      ) => {
+        const socket = net.connect(options);
+        const originalWrite = socket.write;
+        let isFirstWrite = true;
+
+        socket.write = function (
+          this: net.Socket,
+          chunk: Uint8Array | string,
+          encodingOrCb?: BufferEncoding | ((err?: Error | null) => void),
+          cb?: (err?: Error | null) => void,
+        ): boolean {
+          if (isFirstWrite && chunk instanceof Uint8Array && chunk.length > 5) {
+            isFirstWrite = false;
+            this.write = originalWrite;
+
+            let encoding: BufferEncoding | undefined;
+            let callbackRef: ((err?: Error | null) => void) | undefined;
+
+            if (typeof encodingOrCb === "function") {
+              callbackRef = encodingOrCb;
+            } else {
+              encoding = encodingOrCb;
+              callbackRef = cb;
+            }
+
+            const part1 = chunk.subarray(0, 3);
+            const part2 = chunk.subarray(3);
+
+            originalWrite.call(this, part1, encoding);
+            return originalWrite.call(this, part2, encoding, callbackRef);
+          }
+
+          this.write = originalWrite;
+          return originalWrite.call(this, chunk, encodingOrCb as any, cb as any);
+        } as any;
+
+        const tlsSocket = tls.connect({
+          ...options,
+          socket,
+          ciphers: agentOpts.ciphers,
+        });
+
+        tlsSocket.once("secureConnect", () => callback(null, tlsSocket));
+        tlsSocket.once("error", (err) => callback(err));
+        return tlsSocket;
+      };
+    }
+    agent = new https.Agent(agentOpts);
+  } else {
+    if (stealth?.fragment === "split") {
+      agentOpts.createConnection = (
+        options: any,
+        callback: (err: Error | null, socket?: any) => void,
+      ) => {
+        const socket = net.connect(options);
+        socket.once("connect", () => callback(null, socket));
+        socket.once("error", (err) => callback(err));
+        return socket;
+      };
+    }
+    agent = new http.Agent(agentOpts);
+  }
+
+  agentCache.set(cacheKey, agent);
+  return agent;
 }
 
 installReadableStreamDump();
@@ -57,48 +301,44 @@ function isLocalhostUrl(url: string): boolean {
   return host === "localhost" || host.startsWith("localhost:");
 }
 
-function normalizeHeaders(
-  headers: TransportRequest["headers"],
-): Record<string, string> | undefined {
-  if (!headers) return undefined;
+function normalizeHeaders(headers: TransportRequest["headers"]): Record<string, string> {
+  const out: Record<string, string> = Object.create(null);
+  if (!headers) return out;
 
   if (headers instanceof Headers) {
-    const out: Record<string, string> = Object.create(null);
     headers.forEach((value, key) => {
-      out[key] = value;
+      out[key.toLowerCase()] = value;
     });
     return out;
   }
 
   if (Array.isArray(headers)) {
-    const out: Record<string, string> = Object.create(null);
     for (let i = 0; i < headers.length; i++) {
       const pair = headers[i] as unknown as [string, string] | undefined;
-      if (!pair) continue;
-      out[pair[0]] = pair[1];
+      if (!pair || typeof pair[0] !== "string") continue;
+      out[pair[0].toLowerCase()] = String(pair[1]);
     }
     return out;
   }
 
-  const out: Record<string, string> = Object.create(null);
   const src = headers as Record<string, unknown>;
-
   for (const key in src) {
     const value = src[key];
     if (value == null) continue;
 
+    const lKey = key.toLowerCase();
     if (Array.isArray(value)) {
-      out[key] = key.toLowerCase() === "cookie" ? value.join("; ") : value.join(", ");
+      out[lKey] = lKey === "cookie" ? value.join("; ") : value.join(", ");
       continue;
     }
 
-    out[key] = String(value);
+    out[lKey] = String(value);
   }
 
   return out;
 }
 
-function normalizeBody(body: TransportRequest["body"]): BodyInit | undefined {
+function normalizeBody(body: TransportRequest["body"]): any {
   if (body === undefined || body === null) return undefined;
 
   if (
@@ -106,12 +346,9 @@ function normalizeBody(body: TransportRequest["body"]): BodyInit | undefined {
     body instanceof Uint8Array ||
     body instanceof ArrayBuffer ||
     ArrayBuffer.isView(body) ||
-    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) ||
-    (typeof URLSearchParams !== "undefined" && body instanceof URLSearchParams) ||
-    (typeof FormData !== "undefined" && body instanceof FormData) ||
-    (typeof Blob !== "undefined" && body instanceof Blob)
+    (typeof ReadableStream !== "undefined" && body instanceof ReadableStream)
   ) {
-    return body as BodyInit;
+    return body;
   }
 
   if (typeof body === "object") {
@@ -122,12 +359,11 @@ function normalizeBody(body: TransportRequest["body"]): BodyInit | undefined {
 }
 
 /**
- * @ru Реализация транспорта для Node.js с использованием fetch.
- * @en Node.js transport implementation using fetch.
+ * @ru Реализация транспорта для Node.js с использованием нативных http/https модулей.
+ * Поддерживает stealth-маскировку, фрагментацию TLS Client Hello и автоматическую декомпрессию.
  */
 export class NodeTransport implements HyperTransport {
   public config: NodeTransportConfig;
-
   private readonly isProduction: boolean;
   private readonly cleanBaseUrl: string;
 
@@ -146,28 +382,92 @@ export class NodeTransport implements HyperTransport {
       throw new Error("Localhost URL detected in production environment");
     }
 
-    const headers = normalizeHeaders(req.headers);
+    let headers = normalizeHeaders(req.headers);
+
+    if (headers["accept-encoding"] === undefined) {
+      headers["accept-encoding"] = "gzip, deflate, br";
+    }
+
+    const stealthOpts = req.stealth ?? this.config.stealth ?? this.config.network?.stealth;
+    if (stealthOpts) {
+      headers = applyStealthHeaders(headers, stealthOpts);
+    }
+
     const body = normalizeBody(req.body);
+    const urlObj = new URL(fullUrl);
+    const isHttps = urlObj.protocol === "https:";
+    const agent = getNativeAgent(isHttps, stealthOpts);
 
-    const res = await fetchFn(fullUrl, {
-      method: req.method,
-      headers,
-      body,
-      signal: req.signal,
+    return new Promise((resolve, reject) => {
+      const reqOpts: http.RequestOptions | https.RequestOptions = {
+        method: req.method,
+        headers,
+        agent,
+        signal: req.signal,
+      };
+
+      const clientReq = (isHttps ? https : http).request(fullUrl, reqOpts, (res) => {
+        const resHeaders: Record<string, string> = Object.create(null);
+        for (const key in res.headers) {
+          const val = res.headers[key];
+          if (val !== undefined) {
+            resHeaders[key] = Array.isArray(val) ? val.join(", ") : val;
+          }
+        }
+
+        let responseStream: Readable = res;
+        const encoding = resHeaders["content-encoding"]?.toLowerCase();
+
+        if (encoding === "gzip") {
+          responseStream = res.pipe(zlib.createGunzip());
+          delete resHeaders["content-encoding"];
+          delete resHeaders["content-length"];
+        } else if (encoding === "deflate") {
+          responseStream = res.pipe(zlib.createInflate());
+          delete resHeaders["content-encoding"];
+          delete resHeaders["content-length"];
+        } else if (encoding === "br") {
+          responseStream = res.pipe(zlib.createBrotliDecompress());
+          delete resHeaders["content-encoding"];
+          delete resHeaders["content-length"];
+        }
+
+        resolve({
+          status: res.statusCode ?? 200,
+          headers: resHeaders,
+          url: fullUrl,
+          body: Readable.toWeb(responseStream) as TransportResponsePayload,
+        });
+      });
+
+      clientReq.on("error", (err) => reject(err));
+
+      if (body !== undefined && body !== null) {
+        if (typeof body === "string" || body instanceof Uint8Array || ArrayBuffer.isView(body)) {
+          clientReq.write(body);
+          clientReq.end();
+        } else if (body instanceof ArrayBuffer) {
+          clientReq.write(Buffer.from(body));
+          clientReq.end();
+        } else if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) {
+          Readable.fromWeb(body as any).pipe(clientReq);
+        } else {
+          clientReq.end();
+        }
+      } else {
+        clientReq.end();
+      }
     });
+  }
 
-    const stream = (res.body ?? new ReadableStream()) as TransportResponsePayload;
+  public async close(): Promise<void> {
+    for (const agent of agentCache.values()) {
+      agent.destroy();
+    }
+    agentCache.clear();
+  }
 
-    const resHeaders: Record<string, string> = Object.create(null);
-    res.headers.forEach((value, key) => {
-      resHeaders[key] = value;
-    });
-
-    return {
-      status: res.status,
-      headers: resHeaders,
-      url: res.url,
-      body: stream,
-    };
+  public async destroy(): Promise<void> {
+    await this.close();
   }
 }

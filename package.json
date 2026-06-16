@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "1.4.6",
+  "version": "1.4.7",
   "description": "High-performance, extensible HTTP client for Node.js, Bun, Deno and Browser",
   "type": "module",
   "sideEffects": false,
@@ -33,9 +33,9 @@
     "url": "git+https://github.com/IT-IF-OR/hyperttp-core.git"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.2.1",
-    "@hyperttp/transport-bun": "^0.2.2",
-    "@hyperttp/transport-undici": "^0.2.0"
+    "@hyperttp/types": "^0.2.4",
+    "@hyperttp/transport-bun": "^0.2.3",
+    "@hyperttp/transport-undici": "^0.2.3"
   },
   "peerDependenciesMeta": {
     "@hyperttp/types": {
@@ -54,16 +54,16 @@
     "@types/deno": "^2.7.0",
     "@types/node": "^25.9.3",
     "@types/resolve-from": "^5.0.1",
-    "@vitest/coverage-v8": "^4.1.8",
-    "@vitest/ui": "^4.1.8",
+    "@vitest/coverage-v8": "^4.1.9",
+    "@vitest/ui": "^4.1.9",
     "chalk": "^5.6.2",
     "dotenv-cli": "^11.0.0",
     "jiti": "^2.7.0",
-    "oxlint": "^1.69.0",
-    "oxfmt": "^0.54.0",
+    "oxlint": "^1.70.0",
+    "oxfmt": "^0.55.0",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   },
   "scripts": {
     "build": "tsc && d-build",

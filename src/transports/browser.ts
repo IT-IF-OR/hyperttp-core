@@ -20,6 +20,7 @@ export interface BrowserTransportConfig extends HttpClientOptions {
 
 /**
  * @ru Интерфейс для безопасного доступа к мета-окружению сборщиков (Vite, Webpack и др.).
+ * @en Interface for safe access to bundler meta-environment (Vite, Webpack, etc.).
  */
 interface ImportMetaEnv {
   env?: {
@@ -69,11 +70,12 @@ export class BrowserTransport implements HyperTransport {
   public async execute(req: TransportRequest): Promise<TransportResponse> {
     const urlStr = req.url;
 
-    const isAbsolute = urlStr.charCodeAt(0) === 104 && urlStr.charCodeAt(1) === 116; // 'h' = 104, 't' = 116
+    const isAbsolute =
+      urlStr.startsWith("http://") || urlStr.startsWith("https://") || urlStr.startsWith("//");
 
     const fullUrl = isAbsolute
       ? urlStr
-      : urlStr.charCodeAt(0) === 47 // '/' = 47
+      : urlStr.charCodeAt(0) === 47
         ? this.cleanBaseUrl + urlStr
         : this.cleanBaseUrl + "/" + urlStr;
 
@@ -83,35 +85,71 @@ export class BrowserTransport implements HyperTransport {
 
     let body: unknown = req.body;
 
-    let headers = (req.headers as Record<string, string> | undefined) ?? {};
+    const finalHeaders: Record<string, string> = Object.create(null);
+    if (req.headers) {
+      if (req.headers instanceof Headers) {
+        req.headers.forEach((value, key) => {
+          finalHeaders[key.toLowerCase()] = value;
+        });
+      } else if (Array.isArray(req.headers)) {
+        for (let i = 0; i < req.headers.length; i++) {
+          const pair = req.headers[i] as unknown as [string, string] | undefined;
+          if (pair && typeof pair[0] === "string") {
+            finalHeaders[pair[0].toLowerCase()] = String(pair[1]);
+          }
+        }
+      } else {
+        const src = req.headers as Record<string, unknown>;
+        for (const key in src) {
+          const value = src[key];
+          if (value != null) {
+            finalHeaders[key.toLowerCase()] = Array.isArray(value)
+              ? value.join(", ")
+              : String(value);
+          }
+        }
+      }
+    }
 
     if (body !== null && typeof body === "object") {
-      const proto = Object.getPrototypeOf(body) as unknown;
-      if (proto === Object.prototype || proto === null) {
-        body = JSON.stringify(body);
-        if (!headers["Content-Type"]) {
-          headers = { ...headers, "Content-Type": "application/json" };
+      if (
+        body instanceof Uint8Array ||
+        body instanceof ArrayBuffer ||
+        ArrayBuffer.isView(body) ||
+        body instanceof ReadableStream ||
+        body instanceof URLSearchParams ||
+        body instanceof FormData ||
+        body instanceof Blob
+      ) {
+        //
+      } else {
+        const proto = Object.getPrototypeOf(body);
+        if (proto === Object.prototype || proto === null) {
+          body = JSON.stringify(body);
+          if (!finalHeaders["content-type"]) {
+            finalHeaders["content-type"] = "application/json";
+          }
         }
       }
     }
 
     const res = await globalThis.fetch(fullUrl, {
       method: req.method,
-      headers: headers as HeadersInit,
+      headers: finalHeaders as HeadersInit,
       body: body as BodyInit | null,
       signal: req.signal,
     });
 
-    const headersObj: Record<string, string> = {};
+    const resHeaders: Record<string, string> = Object.create(null);
     res.headers.forEach((value, key) => {
-      headersObj[key] = value;
+      resHeaders[key] = value;
     });
 
     return {
       status: res.status,
-      headers: headersObj,
       url: res.url,
       body: res.body as unknown as TransportResponsePayload,
+      headers: resHeaders,
       _raw: res,
     } as TransportResponse;
   }
