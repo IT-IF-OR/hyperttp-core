@@ -1,0 +1,2 @@
+"use strict";export class HttpClientError extends Error{code;statusCode;originalError;url;method;constructor(t,e="HTTP_ERROR",o,r,i,u){super(t,r?{cause:r}:void 0),this.code=e,this.statusCode=o,this.originalError=r,this.url=i,this.method=u,this.name="HttpClientError"}}export class TimeoutError extends HttpClientError{constructor(t,e){super(`Timeout after ${e}ms`,"TIMEOUT",408,void 0,t),this.name="TimeoutError"}}
+//# sourceMappingURL=errors.js.map

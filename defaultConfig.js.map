@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/defaultConfig.ts"],
+  "sourcesContent": ["import type { HttpClientOptions } from \"@hyperttp/types\";\n\nexport const defaultConfig: HttpClientOptions = {\n  network: {\n    timeout: 30000,\n    maxConcurrent: 128,\n    pipelining: 0,\n    keepAliveTimeout: 5000,\n    followRedirects: true,\n    maxRedirects: 5,\n    rejectUnauthorized: true,\n  },\n  retry: {\n    maxRetries: 0,\n    baseDelay: 100,\n    maxDelay: 5000,\n    jitter: true,\n  },\n  verbose: false,\n};\n"],
+  "mappings": "aAEO,aAAM,cAAmC,CAC9C,QAAS,CACP,QAAS,IACT,cAAe,IACf,WAAY,EACZ,iBAAkB,IAClB,gBAAiB,GACjB,aAAc,EACd,mBAAoB,IAEtB,MAAO,CACL,WAAY,EACZ,UAAW,IACX,SAAU,IACV,OAAQ,IAEV,QAAS",
+  "names": []
+}
