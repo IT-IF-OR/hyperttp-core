@@ -160,7 +160,7 @@ function applyStealthHeaders(
 function getNativeAgent(
   isHttps: boolean,
   stealth: StealthOptions | undefined,
-  cache: Map<string, http.Agent | https.Agent>,
+  cache: LRUMap<http.Agent | https.Agent>,
   rejectUnauthorized?: boolean,
 ): http.Agent | https.Agent {
   const fingerprint = stealth?.fingerprint ?? "none";
@@ -352,6 +352,42 @@ function createSizeLimitTransform(maxBytes: number): Transform {
   });
 }
 
+class LRUMap<V> {
+  private map = new Map<string, V>();
+  constructor(private max: number) {}
+  get(key: string): V | undefined {
+    const val = this.map.get(key);
+    if (val !== undefined) {
+      this.map.delete(key);
+      this.map.set(key, val);
+    }
+    return val;
+  }
+  set(key: string, val: V): void {
+    this.map.delete(key);
+    this.map.set(key, val);
+    if (this.map.size > this.max) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) {
+        const evicted = this.map.get(oldest);
+        if (evicted && typeof (evicted as any).destroy === "function") {
+          (evicted as any).destroy();
+        }
+        this.map.delete(oldest);
+      }
+    }
+  }
+  values(): IterableIterator<V> {
+    return this.map.values();
+  }
+  clear(): void {
+    for (const v of this.map.values()) {
+      if (typeof (v as any).destroy === "function") (v as any).destroy();
+    }
+    this.map.clear();
+  }
+}
+
 /**
  * @ru Реализация транспорта для Node.js с использованием нативных http/https модулей.
  * Поддерживает stealth-маскировку, фрагментацию TLS Client Hello и автоматическую декомпрессию.
@@ -360,7 +396,7 @@ export class NodeTransport implements HyperTransport {
   public config: NodeTransportConfig;
   private readonly isProduction: boolean;
   private readonly cleanBaseUrl: string;
-  private readonly agentCache = new Map<string, http.Agent | https.Agent>();
+  private readonly agentCache = new LRUMap<http.Agent | https.Agent>(32);
 
   constructor(config: NodeTransportConfig) {
     this.config = config;
@@ -391,7 +427,12 @@ export class NodeTransport implements HyperTransport {
     const body = req.body;
     const urlObj = new URL(fullUrl);
     const isHttps = urlObj.protocol === "https:";
-    const agent = getNativeAgent(isHttps, stealthOpts, this.agentCache, this.config.network?.rejectUnauthorized);
+    const agent = getNativeAgent(
+      isHttps,
+      stealthOpts,
+      this.agentCache,
+      this.config.network?.rejectUnauthorized,
+    );
 
     return new Promise((resolve, reject) => {
       const reqOpts: http.RequestOptions | https.RequestOptions = {

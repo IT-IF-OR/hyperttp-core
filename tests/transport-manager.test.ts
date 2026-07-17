@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { TransportManager, CURRENT_RUNTIME } from "../src/transports/manager.js";
 import { NodeTransport } from "../src/transports/node.js";
 

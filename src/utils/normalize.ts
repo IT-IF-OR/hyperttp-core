@@ -2,14 +2,8 @@ import type { Method, RequestBodyData } from "@hyperttp/types";
 
 type NormalizedHeaders = Record<string, string | string[]>;
 
-/**
- * @ru Карта заголовков, которые должны содержать только одно значение (не массив).
- * Использует `Object.create(null)` для быстрого доступа без прототипа.
- * @en Map of headers that should contain only a single value (not an array).
- * Uses `Object.create(null)` for fast prototype-less access.
- */
 const SINGLE_VALUE_HEADERS: Record<string, 1> = Object.create(null);
-for (const h of [
+const singleHeaders = [
   "content-type",
   "content-length",
   "content-encoding",
@@ -23,25 +17,15 @@ for (const h of [
   "location",
   "etag",
   "last-modified",
-] as const) {
-  SINGLE_VALUE_HEADERS[h] = 1;
+] as const;
+
+for (let i = 0; i < singleHeaders.length; i++) {
+  SINGLE_VALUE_HEADERS[singleHeaders[i]!] = 1;
 }
 
-
-
-/**
- * @ru Кэш для нормализации ключей заголовков (lowercase).
- * Ограничен размером HEADER_CACHE_LIMIT для предотвращения утечек памяти.
- * @en Cache for header key normalization (lowercase).
- * Limited by HEADER_CACHE_LIMIT to prevent memory leaks.
- */
 const HEADER_CACHE_LIMIT = 2048;
 const HEADER_KEY_CACHE: Record<string, string> = Object.create(null);
 
-/**
- * @ru Список наиболее распространённых HTTP-заголовков для предзаполнения кэша.
- * @en List of most common HTTP headers for cache pre-population.
- */
 const COMMON_HEADERS = [
   "accept",
   "accept-encoding",
@@ -80,12 +64,6 @@ for (let i = 0; i < COMMON_HEADERS.length; i++) {
 
 let cacheSize = COMMON_HEADERS.length;
 
-/**
- * @ru Быстрая нормализация ключа заголовка в нижний регистр с кэшированием.
- * @en Fast header key normalization to lowercase with caching.
- * @param key - The header key to normalize.
- * @returns The lowercase version of the key.
- */
 function fastLowercaseKey(key: string): string {
   const cached = HEADER_KEY_CACHE[key];
   if (cached !== undefined) return cached;
@@ -99,13 +77,10 @@ function fastLowercaseKey(key: string): string {
 }
 
 /**
- * @ru Извлекает URL из объекта запроса или строки.
- * Поддерживает различные форматы: строка, объект с полем `url`, `_url`, или `scheme/host/path`.
- * @en Extracts URL from a request object or string.
- * Supports various formats: string, object with `url`, `_url`, or `scheme/host/path` fields.
- * @param req - The request object or URL string.
+ * @ru Извлекает URL из запроса (строка, объект с url/_url или схема+хост+путь).
+ * @en Extracts the URL from a request (string, object with url/_url, or scheme+host+path).
+ * @param req - URL string or request-like object.
  * @returns The extracted URL string.
- * @throws Error if URL is missing in the request.
  */
 export function normalizeUrl(req: unknown): string {
   if (typeof req === "string") return req;
@@ -126,24 +101,27 @@ export function normalizeUrl(req: unknown): string {
     const path = r.path;
 
     if (typeof scheme === "string" && typeof host === "string" && typeof path === "string") {
-      return `${scheme}://${host}${path}`;
+      return scheme + "://" + host + path;
     }
   }
 
   throw new Error("URL missing in request");
 }
 
-/**
- * @ru Добавляет значение заголовка к нормализованному объекту заголовков.
- * Учитывает специальные правила для `set-cookie`, `cookie`, и других заголовков.
- * @en Appends a header value to the normalized headers object.
- * Accounts for special rules for `set-cookie`, `cookie`, and other headers.
- * @param out - The normalized headers object to modify.
- * @param lowerKey - The lowercase header key.
- * @param value - The header value to append.
- */
+function hasNewline(str: string): boolean {
+  const len = str.length;
+  for (let i = 0; i < len; i++) {
+    const code = str.charCodeAt(i);
+    if (code === 10 || code === 13) return true;
+  }
+  return false;
+}
+
 function appendHeader(out: NormalizedHeaders, lowerKey: string, value: string): void {
-  value = value.replace(/[\r\n]/g, "");
+  if (hasNewline(value)) {
+    value = value.replace(/[\r\n]/g, "");
+  }
+
   if (SINGLE_VALUE_HEADERS[lowerKey] === 1) {
     out[lowerKey] = value;
     return;
@@ -173,15 +151,6 @@ function appendHeader(out: NormalizedHeaders, lowerKey: string, value: string): 
   out[lowerKey] = existing + ", " + value;
 }
 
-/**
- * @ru Добавляет сырое значение заголовка к нормализованному объекту.
- * Обрабатывает массивы значений и преобразует нестроковые значения в строки.
- * @en Appends a raw header value to the normalized headers object.
- * Handles arrays of values and converts non-string values to strings.
- * @param out - The normalized headers object to modify.
- * @param lower - The lowercase header key.
- * @param raw - The raw header value (string, array, or other).
- */
 function appendRawValue(out: NormalizedHeaders, lower: string, raw: unknown): void {
   if (raw === undefined || raw === null) return;
 
@@ -200,36 +169,25 @@ function appendRawValue(out: NormalizedHeaders, lower: string, raw: unknown): vo
 }
 
 /**
- * @ru Нормализует заголовки запроса в единый формат с ключами в нижнем регистре.
- * Поддерживает различные входные форматы: объект, массив пар, плоский массив.
- *
- * Специальные правила:
- * - `set-cookie` всегда хранится как массив
- * - `cookie`/`cookie2` объединяются через `; `
- * - Остальные множественные заголовки объединяются через `, `
- * - Заголовки из SINGLE_VALUE_HEADERS перезаписываются (не объединяются)
- *
- * @en Normalizes request headers into a unified format with lowercase keys.
- * Supports various input formats: object, array of pairs, flat array.
- *
- * Special rules:
- * - `set-cookie` is always stored as an array
- * - `cookie`/`cookie2` are joined with `; `
- * - Other multiple headers are joined with `, `
- * - Headers from SINGLE_VALUE_HEADERS are overwritten (not merged)
- *
- * @param headers - The headers to normalize (object, array of pairs, or flat array).
- * @returns Normalized headers object with lowercase keys.
+ * @ru Нормализует заголовки в плоский объект с нижним регистром ключей и обработкой массива/парных форматов.
+ * @en Normalizes headers into a flat object with lowercased keys, handling array/pair formats.
+ * @param headers - Headers in any supported format (object, array of pairs, flat array).
+ * @param out - Optional output object (reused for pooling).
+ * @returns Normalized headers object.
  */
-export function normalizeHeaders(headers: unknown): NormalizedHeaders {
-  const out: NormalizedHeaders = Object.create(null);
+export function normalizeHeaders(
+  headers: unknown,
+  out: NormalizedHeaders = Object.create(null),
+): NormalizedHeaders {
   if (!headers || typeof headers !== "object") return out;
 
   if (!Array.isArray(headers)) {
     for (const key in headers) {
-      const val = (headers as Record<string, unknown>)[key];
-      if (val !== undefined && val !== null) {
-        appendRawValue(out, fastLowercaseKey(key), val);
+      if (Object.prototype.hasOwnProperty.call(headers, key)) {
+        const val = (headers as Record<string, unknown>)[key];
+        if (val !== undefined && val !== null) {
+          appendRawValue(out, fastLowercaseKey(key), val);
+        }
       }
     }
     return out;
@@ -275,11 +233,11 @@ export function normalizeHeaders(headers: unknown): NormalizedHeaders {
 }
 
 /**
- * @ru Нормализует тело запроса, удаляя его для методов GET и HEAD.
- * @en Normalizes request body by removing it for GET and HEAD methods.
- * @param method - The HTTP method.
- * @param body - The request body data.
- * @returns The body for methods that support it, or undefined for GET/HEAD.
+ * @ru Возвращает undefined для GET/HEAD (тело запрещено), иначе тело как есть.
+ * @en Returns undefined for GET/HEAD (body disallowed), otherwise the body as-is.
+ * @param method - HTTP method.
+ * @param body - Request body.
+ * @returns Normalized body or undefined.
  */
 export function normalizeBody(
   method: Method,
@@ -288,9 +246,7 @@ export function normalizeBody(
   return method === "GET" || method === "HEAD" ? undefined : body;
 }
 
-function getContentType(
-  headers: Record<string, string | string[]>,
-): string | undefined {
+function getContentType(headers: Record<string, string | string[]>): string | undefined {
   const ct = headers["content-type"];
   if (typeof ct === "string") return ct;
   if (Array.isArray(ct)) return ct[0];
@@ -298,15 +254,11 @@ function getContentType(
 }
 
 /**
- * @ru Сериализует тело запроса для транспорта: plain objects → JSON,
- * URLSearchParams → string, pass-through для остальных типов.
- * Мутирует headers, выставляя content-type если не задан.
- * @en Serializes request body for transport: plain objects → JSON,
- * URLSearchParams → string, pass-through for other types.
- * Mutates headers, setting content-type if not already set.
- * @param body - The request body to normalize.
- * @param headers - The request headers (mutated in place).
- * @returns The transport-ready body.
+ * @ru Преобразует тело для транспорта: сериализует объекты в JSON, URLSearchParams в строку, проставляет Content-Type.
+ * @en Transforms body for transport: serializes objects to JSON, URLSearchParams to string, sets Content-Type.
+ * @param body - Request body.
+ * @param headers - Headers object (may be mutated to add Content-Type).
+ * @returns Body ready for transport.
  */
 export function normalizeBodyForTransport(
   body: RequestBodyData,

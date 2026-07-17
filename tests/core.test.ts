@@ -132,7 +132,6 @@ describe("HyperCore extend / create", () => {
 describe("HyperCore headers", () => {
   it("sends default headers", async () => {
     const res = await client.get("/get");
-    const text = await res.text();
     expect(res.headers).toBeDefined();
   });
 

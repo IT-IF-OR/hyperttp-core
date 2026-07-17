@@ -34,5 +34,3 @@ export class TimeoutError extends HttpClientError {
     this.name = "TimeoutError";
   }
 }
-
-

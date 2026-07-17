@@ -40,6 +40,17 @@ export async function drainBody(body: unknown): Promise<void> {
 
     if (typeof stream.resume === "function") {
       (stream.resume as () => void)();
+      return;
+    }
+
+    if (typeof stream.cancel === "function") {
+      await (stream.cancel as () => Promise<void>)();
+      return;
+    }
+
+    if (typeof stream.getReader === "function") {
+      const reader = (stream as unknown as ReadableStream).getReader();
+      reader.cancel();
     }
   } catch {
     //

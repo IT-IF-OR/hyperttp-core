@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { HyperCore } from "../src/Core/HyperCore.js";
 import { NodeTransport } from "../src/transports/node.js";
-import type { HyperPlugin, InternalRequest, HttpResponse, HyperttpError, PluginContext, TransportResponse } from "@hyperttp/types";
+import type { HyperPlugin, TransportResponse } from "@hyperttp/types";
 
 const BASE = "http://127.0.0.1:3000";
 
@@ -134,7 +134,7 @@ describe("Plugin pipeline", () => {
       name,
       priority,
       onRequest: () => { order.push(name); },
-    });
+    } as any);
     const core = makeCore();
     core.use(makePlugin("low", -10));
     core.use(makePlugin("high", 100));

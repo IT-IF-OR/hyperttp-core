@@ -9,52 +9,105 @@ import type {
 import { normalizeBody, normalizeUrl } from "../utils/normalize.js";
 import { mergeHeadersFast } from "../utils/response.js";
 
-function combineSignals(userSignal: AbortSignal, timeoutMs: number): AbortSignal {
-  if (typeof AbortSignal.any === "function") {
-    return AbortSignal.any([userSignal, AbortSignal.timeout(timeoutMs)]);
+/**
+ * @ru Менеджер переиспользуемых AbortController для устранения аллокаций при тайм-аутах.
+ * @en Reusable AbortController manager to eliminate allocations on timeouts.
+ */
+class AbortHandlerManager {
+  public activeControllers: AbortController[] = [];
+
+  constructor() {
+    for (let i = 0; i < 64; i++) {
+      this.activeControllers.push(new AbortController());
+    }
   }
 
-  const controller = new AbortController();
-  let cleanup: (() => void) | undefined;
+  /**
+   * @ru Захватывает контроллер из пула, настраивает тайм-аут и пользовательский сигнал.
+   * @en Acquires a controller from the pool, sets up timeout and user signal.
+   * @param userSignal - Optional external abort signal.
+   * @param timeoutMs - Timeout in milliseconds.
+   * @param meta - Metadata object receiving cleanup function.
+   * @returns AbortSignal bound to the timeout and user signal.
+   */
+  public acquire(userSignal: AbortSignal | undefined, timeoutMs: number, meta: any): AbortSignal {
+    const controller = this.activeControllers.pop() ?? new AbortController();
 
-  const onUserAbort = () => {
-    cleanup?.();
-    controller.abort(userSignal.reason);
-  };
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
 
-  const onTimeout = () => {
-    controller.abort(new DOMException("Timeout", "TimeoutError"));
-  };
+      if (userSignal) {
+        userSignal.removeEventListener("abort", onUserAbort);
+      }
+      clearTimeout(timeoutId);
 
-  const timeoutId = setTimeout(onTimeout, timeoutMs);
-  cleanup = () => {
-    clearTimeout(timeoutId);
-  };
+      this.activeControllers.push(controller);
+    };
 
-  userSignal.addEventListener("abort", onUserAbort);
+    const timeoutId = setTimeout(() => {
+      controller.abort(new DOMException("Timeout", "TimeoutError"));
+      cleanup();
+    }, timeoutMs);
 
-  controller.signal.addEventListener("abort", () => {
-    userSignal.removeEventListener("abort", onUserAbort);
-    clearTimeout(timeoutId);
-  });
+    const onUserAbort = () => {
+      controller.abort(userSignal?.reason);
+      cleanup();
+    };
 
-  return controller.signal;
+    if (userSignal) {
+      userSignal.addEventListener("abort", onUserAbort);
+    }
+
+    meta.cleanupSignal = cleanup;
+
+    return controller.signal;
+  }
 }
 
+const abortManager = new AbortHandlerManager();
+
+/**
+ * @ru Применяет тайм-аут к сигналу отмены через пул переиспользуемых контроллеров.
+ * @en Applies a timeout to the abort signal via a pool of reusable controllers.
+ * @param signal - Optional external abort signal.
+ * @param timeout - Timeout in milliseconds (skip if null/<=0).
+ * @param meta - Metadata object receiving cleanup function.
+ * @returns New abort signal with timeout, or the original signal.
+ */
 function applyTimeout(
   signal: AbortSignal | undefined,
   timeout: number | undefined,
+  meta: any,
 ): AbortSignal | undefined {
   if (timeout == null || timeout <= 0) return signal;
-  if (!signal) return AbortSignal.timeout(timeout);
-  return combineSignals(signal, timeout);
+  return abortManager.acquire(signal, timeout, meta);
 }
 
+/**
+ * @ru Строитель внутренних запросов с кэшированием URL и пулом объектов.
+ * @en Internal request builder with URL caching and object pooling.
+ */
 export class RequestBuilder {
   private urlCache: Record<string, string> = Object.create(null);
-  private urlCacheCount = 0;
+  private cacheKeys: string[] = Array.from({ length: 512 });
+  private cacheIndex = 0;
   private readonly MAX_CACHE_SIZE = 512;
 
+  /**
+   * @ru Собирает InternalRequest из публичного API-вызова, переиспользуя пулированный объект.
+   * @en Builds an InternalRequest from a public API call, reusing a pooled object.
+   * @param method - HTTP method.
+   * @param req - URL string or RequestInterface object.
+   * @param body - Optional request body.
+   * @param signal - Optional abort signal.
+   * @param responseType - Response type hint ("stream" or undefined).
+   * @param defaultHeaders - Default headers to apply.
+   * @param config - Client configuration.
+   * @param pooled - Optional pre-allocated InternalRequest to reuse.
+   * @returns The built InternalRequest.
+   */
   build(
     method: Method,
     req: RequestInterface | string,
@@ -85,17 +138,25 @@ export class RequestBuilder {
       timings: {
         networkMs: number | undefined;
       };
+      cleanupSignal?: () => void;
     };
 
     if (typeof req === "string") {
       internalReq.method = method;
       internalReq.url = this.resolveUrl(req, config.baseURL);
-      internalReq.headers = { ...defaultHeaders };
+
+      if (body !== undefined) {
+        internalReq.headers = Object.create(null);
+        for (const k in defaultHeaders) {
+          internalReq.headers[k] = defaultHeaders[k]!;
+        }
+      } else {
+        internalReq.headers = defaultHeaders;
+      }
+
       internalReq.body = body !== undefined ? normalizeBody(method, body) : undefined;
-      internalReq.signal = applyTimeout(signal, config.network?.timeout);
-
+      internalReq.signal = applyTimeout(signal, config.network?.timeout, metaObj);
       metaObj.responseType = responseType;
-
       internalReq.stealth = config.network?.stealth;
       return internalReq;
     }
@@ -111,10 +172,7 @@ export class RequestBuilder {
 
       if (!baseUrl) {
         baseUrl = config.baseURL ? new URL(rawUrl, config.baseURL).href : new URL(rawUrl).href;
-
-        this.ensureCacheSpace();
-        this.urlCache[cacheKey] = baseUrl;
-        this.urlCacheCount++;
+        this.writeToCache(cacheKey, baseUrl);
       }
 
       const urlObj = new URL(baseUrl);
@@ -124,32 +182,43 @@ export class RequestBuilder {
       let cachedUrl = this.urlCache[rawUrl];
       if (!cachedUrl) {
         cachedUrl = config.baseURL ? new URL(rawUrl, config.baseURL).href : new URL(rawUrl).href;
-
-        if (this.urlCacheCount >= this.MAX_CACHE_SIZE) {
-          this.urlCache = Object.create(null);
-          this.urlCacheCount = 0;
-        }
-        this.urlCache[rawUrl] = cachedUrl;
-        this.urlCacheCount++;
+        this.writeToCache(rawUrl, cachedUrl);
       }
       finalUrl = cachedUrl;
     }
 
     internalReq.method = method;
     internalReq.url = finalUrl;
-    internalReq.headers = req.headers
-      ? mergeHeadersFast({ ...defaultHeaders }, req.headers)
-      : { ...defaultHeaders };
+
+    if (req.headers) {
+      const targetHeaders = Object.create(null);
+      for (const k in defaultHeaders) {
+        targetHeaders[k] = defaultHeaders[k]!;
+      }
+      internalReq.headers = mergeHeadersFast(targetHeaders, req.headers);
+    } else {
+      internalReq.headers = defaultHeaders;
+    }
+
     internalReq.body = normalizeBody(method, req.body ?? body);
-    internalReq.signal = applyTimeout(req.signal ?? signal, config.network?.timeout);
+    internalReq.signal = applyTimeout(req.signal ?? signal, config.network?.timeout, metaObj);
 
     metaObj.responseType =
       responseType ?? (req.meta as { responseType?: ResponseType })?.responseType;
 
     if (req.stealth) {
-      internalReq.stealth = config.network?.stealth
-        ? { ...config.network.stealth, ...req.stealth }
-        : req.stealth;
+      if (config.network?.stealth) {
+        const nextStealth = Object.create(null);
+        for (const k in config.network.stealth) {
+          nextStealth[k] = (config.network.stealth as any)[k];
+        }
+        for (const k in req.stealth) {
+          nextStealth[k] = (req.stealth as any)[k];
+        }
+        internalReq.stealth = nextStealth;
+      } else {
+        internalReq.stealth = req.stealth;
+      }
     } else {
       internalReq.stealth = config.network?.stealth;
     }
@@ -157,35 +226,38 @@ export class RequestBuilder {
     return internalReq;
   }
 
-  private resolveUrl(url: string, baseURL?: string): string {
+  /**
+   * @ru Разрешает URL относительно baseURL с кэшированием результата.
+   * @en Resolves a URL against baseURL with result caching.
+   * @param url - URL to resolve (absolute or relative).
+   * @param baseURL - Optional base URL.
+   * @returns The resolved absolute URL.
+   */
+  public resolveUrl(url: string, baseURL?: string): string {
     if (!url) throw new Error("[HyperCore] URL is undefined");
 
     let finalUrl = this.urlCache[url];
     if (finalUrl) return finalUrl;
 
     const isAbsolute = url.startsWith("http://") || url.startsWith("https://");
-
     if (isAbsolute && !url.includes("?")) {
       finalUrl = url;
     } else {
       finalUrl = baseURL ? new URL(url, baseURL).href : new URL(url).href;
     }
 
-    if (this.urlCacheCount >= this.MAX_CACHE_SIZE) {
-      this.urlCache = Object.create(null);
-      this.urlCacheCount = 0;
-    }
-    this.urlCache[url] = finalUrl;
-    this.urlCacheCount++;
-
+    this.writeToCache(url, finalUrl);
     return finalUrl;
   }
 
-  private ensureCacheSpace(): void {
-    if (this.urlCacheCount >= this.MAX_CACHE_SIZE) {
-      this.urlCache = Object.create(null);
-      this.urlCacheCount = 0;
+  private writeToCache(key: string, value: string): void {
+    const oldKey = this.cacheKeys[this.cacheIndex];
+    if (oldKey !== undefined) {
+      delete this.urlCache[oldKey];
     }
+    this.urlCache[key] = value;
+    this.cacheKeys[this.cacheIndex] = key;
+    this.cacheIndex = (this.cacheIndex + 1) % this.MAX_CACHE_SIZE;
   }
 
   private appendQueryParams(url: URL, query: Record<string, unknown>): void {

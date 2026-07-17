@@ -15,7 +15,7 @@ import type {
   TransportResponse,
 } from "@hyperttp/types";
 import { defaultConfig } from "../defaultConfig.js";
-import { mapResponseFast, mapStreamFast } from "../utils/response.js";
+import { mapResponseFast, mapStreamFast, recycleResponse } from "../utils/response.js";
 import { TransportManager } from "../transports/manager.js";
 import {
   createPipelines,
@@ -35,12 +35,34 @@ type TransportArgs = Parameters<HyperTransport["execute"]>[0];
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const MAX_POOL_SIZE = 64;
 
+/**
+ * @ru Семафор для ограничения конкурентных HTTP-запросов.
+ * @en Semaphore for limiting concurrent HTTP requests.
+ */
 class Semaphore {
   private current = 0;
   private queue: Array<() => void> = [];
 
   constructor(private max: number) {}
 
+  /**
+   * @ru Пытается захватить слот без ожидания.
+   * @en Attempts to acquire a slot without waiting.
+   * @returns true if the slot was acquired.
+   */
+  tryAcquire(): boolean {
+    if (this.current < this.max) {
+      this.current++;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * @ru Захватывает слот, ожидая при необходимости.
+   * @en Acquires a slot, waiting if necessary.
+   * @returns Promise that resolves when the slot is acquired.
+   */
   acquire(): Promise<void> {
     if (this.current < this.max) {
       this.current++;
@@ -54,6 +76,10 @@ class Semaphore {
     });
   }
 
+  /**
+   * @ru Освобождает слот и запускает ожидающий из очереди.
+   * @en Releases a slot and wakes the next waiter in the queue.
+   */
   release(): void {
     const next = this.queue.shift();
     if (next) {
@@ -65,10 +91,8 @@ class Semaphore {
 }
 
 /**
- * @ru Ядро HTTP-клиента Hyperttp. Обеспечивает диспетчеризацию запросов через
- * конвейер плагинов, пулинг объектов запросов и кэширование URL.
- * @en Hyperttp HTTP client core. Provides request dispatching through the
- * plugin pipeline, request object pooling, and URL caching.
+ * @ru Основной класс HTTP-клиента Hyperttp. Управляет транспортом, плагинами, повторными попытками и пулом запросов.
+ * @en Core Hyperttp HTTP client class. Manages transport, plugins, retries, and request pooling.
  */
 export class HyperCore implements IHyperCore {
   public config: HttpClientOptions;
@@ -86,12 +110,12 @@ export class HyperCore implements IHyperCore {
   private hasResponsePlugins = false;
   private hasErrorPlugins = false;
 
-  /**
-   * @ru Создаёт новый экземпляр ядра HTTP-клиента.
-   * @en Creates a new HTTP client core instance.
-   * @param config - Client configuration options.
-   * @param transport - Optional custom transport implementation.
-   */
+  private readonly _cachedMaxRetries: number;
+  private readonly _cachedRetryOpts: {
+    maxRetries?: number;
+    [k: string]: unknown;
+  };
+
   constructor(config: HttpClientOptions = defaultConfig, transport?: HyperTransport) {
     this.config = {
       ...defaultConfig,
@@ -118,15 +142,19 @@ export class HyperCore implements IHyperCore {
     });
 
     const maxConcurrent = this.config.network?.maxConcurrent;
-    this.semaphore = maxConcurrent != null && maxConcurrent > 0 ? new Semaphore(maxConcurrent) : null;
+    this.semaphore =
+      maxConcurrent != null && maxConcurrent > 0 ? new Semaphore(maxConcurrent) : null;
+
+    this._cachedRetryOpts = this.config.retry ?? {};
+    this._cachedMaxRetries = this._cachedRetryOpts.maxRetries ?? 0;
 
     this.pluginCtx = { config: this.config, core: this };
   }
 
   /**
-   * @ru Возвращает имя класса текущего активного транспорта.
-   * @en Returns the class name of the currently active transport.
-   * @returns Promise resolving to the transport class name.
+   * @ru Возвращает имя текущего транспорта.
+   * @en Returns the name of the current transport.
+   * @returns Transport constructor name.
    */
   public async getTransportName(): Promise<string> {
     const t = this.transportManager.transport ?? (await this.transportManager.get());
@@ -134,17 +162,14 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Отправляет внутренний запрос через полный конвейер обработки:
-   * плагины запроса → транспорт → плагины данных ответа → маппинг → плагины ответа.
-   * @en Dispatches an internal request through the full processing pipeline:
-   * request plugins → transport → response data plugins → mapping → response plugins.
-   * @template T - Expected response body type.
-   * @param req - The normalized internal request object.
+   * @ru Основной метод отправки запроса через транспорт с поддержкой плагинов и повторных попыток.
+   * @en Core request dispatch method through transport with plugin and retry support.
+   * @param req - The internal request to dispatch.
    * @returns Promise resolving to the HTTP response.
    */
   public async dispatch<T = unknown>(req: InternalRequest): Promise<HttpResponse<T>> {
-    const retryOpts = this.config.retry ?? {};
-    const maxRetries = retryOpts.maxRetries ?? 0;
+    const retryOpts = this._cachedRetryOpts;
+    const maxRetries = this._cachedMaxRetries;
 
     for (let attempt = 0; ; attempt++) {
       try {
@@ -167,22 +192,26 @@ export class HyperCore implements IHyperCore {
           this.transportManager.getSync() ??
           (await this.transportReady);
 
-        if (this.semaphore) await this.semaphore.acquire();
-        let rawResponse: TransportResponse;
-        const networkStart = performance.now();
-        try {
-          rawResponse = await transport.execute(req as TransportArgs);
-        } finally {
-          this.semaphore?.release();
+        let acquired = false;
+        if (this.semaphore) {
+          acquired = this.semaphore.tryAcquire();
+          if (!acquired) await this.semaphore.acquire();
+          acquired = true;
         }
-        const networkMs = performance.now() - networkStart;
-
+        let rawResponse: TransportResponse;
         const meta = req.meta as {
           responseType?: ResponseType;
           timings?: { networkMs?: number };
         };
-        if (meta.timings) {
-          meta.timings.networkMs = networkMs;
+        const shouldTrackTimings = !!meta.timings;
+        const networkStart = shouldTrackTimings ? performance.now() : 0;
+        try {
+          rawResponse = await transport.execute(req as TransportArgs);
+        } finally {
+          if (acquired) this.semaphore?.release();
+        }
+        if (shouldTrackTimings) {
+          meta.timings!.networkMs = performance.now() - networkStart;
         }
 
         if (attempt < maxRetries && shouldRetry(rawResponse.status, retryOpts)) {
@@ -206,22 +235,11 @@ export class HyperCore implements IHyperCore {
             : mapResponseFast(rawResponse);
 
         if (this.hasResponsePlugins) {
-          const reqForPipeline =
-            this.pipelines.responseSideEffects.length > 0
-              ? {
-                  ...req,
-                  meta: {
-                    ...meta,
-                    timings: meta.timings ? { ...meta.timings } : undefined,
-                  },
-                }
-              : req;
-
           const syncResult = executeResponsePipeline(
             this.pipelines.responseMutators,
             this.pipelines.responseSideEffects,
             response as HttpResponse,
-            reqForPipeline,
+            req,
             this.pluginCtx,
             this.config.logger,
           );
@@ -252,10 +270,10 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Регистрирует плагин в экземпляре клиента. Плагины выполняются в порядке приоритета.
-   * @en Registers a plugin into the client instance. Plugins are executed in priority order.
+   * @ru Регистрирует плагин с сортировкой по приоритету. Пропускает отключённые плагины.
+   * @en Registers a plugin sorted by priority. Skips disabled plugins.
    * @param plugin - The plugin instance to register.
-   * @returns The current instance for chaining.
+   * @returns This instance for chaining.
    */
   public use(plugin: HyperPlugin): this {
     const isEnabled = plugin.enabled ? plugin.enabled(this.config) : true;
@@ -263,11 +281,13 @@ export class HyperCore implements IHyperCore {
 
     plugin.setup?.(this.pluginCtx);
     const priority = (plugin as { priority?: number }).priority ?? 0;
-    const hook = { name: plugin.name, priority };
+
+    const hook = { name: plugin.name, priority, run: null as any };
 
     if (plugin.onRequest) {
       insertHookSorted(this.pipelines.request, {
-        ...hook,
+        name: hook.name,
+        priority: hook.priority,
         run: plugin.onRequest,
       });
       this.hasRequestPlugins = true;
@@ -277,41 +297,101 @@ export class HyperCore implements IHyperCore {
         plugin.mode === "background"
           ? this.pipelines.responseSideEffects
           : this.pipelines.responseMutators;
-      insertHookSorted(target, { ...hook, run: plugin.onResponse });
+      insertHookSorted(target, {
+        name: hook.name,
+        priority: hook.priority,
+        run: plugin.onResponse,
+      });
       this.hasResponsePlugins = true;
     }
     if (plugin.onResponseData) {
       insertHookSorted(this.pipelines.responseData, {
-        ...hook,
+        name: hook.name,
+        priority: hook.priority,
         run: plugin.onResponseData,
       });
       this.hasResponseDataPlugins = true;
     }
     if (plugin.onError) {
-      insertHookSorted(this.pipelines.error, { ...hook, run: plugin.onError });
+      insertHookSorted(this.pipelines.error, {
+        name: hook.name,
+        priority: hook.priority,
+        run: plugin.onError,
+      });
       this.hasErrorPlugins = true;
     }
     return this;
   }
 
   /**
-   * @ru Выполняет GET-запрос.
-   * @en Performs a GET request.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
+   * @ru Выполняет GET-запрос. Использует быстрый путь для простых строковых URL без плагинов/повторов.
+   * @en Performs a GET request. Uses a fast path for bare string URLs without plugins/retries.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response.
    */
   public get<T = unknown>(req: RequestInterface | string, signal?: AbortSignal) {
+    if (
+      typeof req === "string" &&
+      req !== "" &&
+      !signal &&
+      !this.hasRequestPlugins &&
+      !this.hasResponsePlugins &&
+      !this.hasResponseDataPlugins &&
+      !this.hasErrorPlugins &&
+      this._cachedMaxRetries === 0
+    ) {
+      return this.fastGet<T>(req);
+    }
     return this.dispatch<T>(this.acquireReq("GET", req, undefined, signal));
   }
 
+  private async fastGet<T>(url: string): Promise<HttpResponse<T>> {
+    const resolvedUrl = this.requestBuilder.resolveUrl(url, this.config.baseURL);
+
+    let acquired = false;
+    if (this.semaphore) {
+      acquired = this.semaphore.tryAcquire();
+      if (!acquired) {
+        await this.semaphore.acquire();
+        acquired = true;
+      }
+    }
+
+    const transport =
+      this.transportManager.transport ??
+      this.transportManager.getSync() ??
+      (await this.transportReady);
+
+    try {
+      if (typeof (transport as any).fastRequest === "function") {
+        return (await (transport as any).fastRequest(
+          resolvedUrl,
+          "GET",
+          this.defaultHeaders,
+        )) as HttpResponse<T>;
+      }
+
+      const raw = await transport.execute({
+        method: "GET",
+        url: resolvedUrl,
+        headers: this.defaultHeaders as Record<string, string>,
+        body: undefined,
+        signal: undefined,
+        stealth: this.config.network?.stealth,
+      } as TransportArgs);
+
+      return mapResponseFast(raw) as HttpResponse<T>;
+    } finally {
+      if (acquired) this.semaphore?.release();
+    }
+  }
+
   /**
-   * @ru Выполняет POST-запрос с телом.
-   * @en Performs a POST request with a body.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
-   * @param body - Request body data.
+   * @ru Выполняет POST-запрос.
+   * @en Performs a POST request.
+   * @param req - URL string or RequestInterface.
+   * @param body - Optional request body.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response.
    */
@@ -324,11 +404,10 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Выполняет PUT-запрос с телом.
-   * @en Performs a PUT request with a body.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
-   * @param body - Request body data.
+   * @ru Выполняет PUT-запрос.
+   * @en Performs a PUT request.
+   * @param req - URL string or RequestInterface.
+   * @param body - Optional request body.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response.
    */
@@ -341,11 +420,10 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Выполняет PATCH-запрос с телом.
-   * @en Performs a PATCH request with a body.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
-   * @param body - Request body data.
+   * @ru Выполняет PATCH-запрос.
+   * @en Performs a PATCH request.
+   * @param req - URL string or RequestInterface.
+   * @param body - Optional request body.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response.
    */
@@ -360,8 +438,7 @@ export class HyperCore implements IHyperCore {
   /**
    * @ru Выполняет DELETE-запрос.
    * @en Performs a DELETE request.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response.
    */
@@ -372,9 +449,8 @@ export class HyperCore implements IHyperCore {
   /**
    * @ru Выполняет OPTIONS-запрос.
    * @en Performs an OPTIONS request.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
-   * @param body - Optional request body data.
+   * @param req - URL string or RequestInterface.
+   * @param body - Optional request body.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response.
    */
@@ -387,9 +463,9 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Выполняет HEAD-запрос (без тела ответа).
-   * @en Performs a HEAD request (no response body).
-   * @param req - Request URL or RequestInterface object.
+   * @ru Выполняет HEAD-запрос.
+   * @en Performs a HEAD request.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the HTTP response with null body.
    */
@@ -398,11 +474,11 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Инициирует потоковый GET-запрос. Тело ответа возвращается как ReadableStream.
-   * @en Initiates a streaming GET request. Response body is returned as a ReadableStream.
-   * @param req - Request URL or RequestInterface object.
+   * @ru Выполняет GET-запрос и возвращает стриминг-ответ.
+   * @en Performs a GET request and returns a streaming response.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
-   * @returns Promise resolving to the stream response.
+   * @returns Promise resolving to a StreamResponse.
    */
   public stream(
     req: RequestInterface | string,
@@ -414,13 +490,12 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Инициирует потоковый POST-запрос с телом. Тело ответа возвращается как ReadableStream.
-   * @en Initiates a streaming POST request with a body. Response body is returned as a ReadableStream.
-   * @template T - Expected response body type.
-   * @param req - Request URL or RequestInterface object.
-   * @param body - Request body data.
+   * @ru Выполняет POST-запрос и возвращает стриминг-ответ.
+   * @en Performs a POST request and returns a streaming response.
+   * @param req - URL string or RequestInterface.
+   * @param body - Optional request body.
    * @param signal - Optional abort signal.
-   * @returns Promise resolving to the stream response.
+   * @returns Promise resolving to a StreamResponse.
    */
   public postStream<T = unknown>(
     req: RequestInterface | string,
@@ -433,33 +508,39 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Создаёт новый экземпляр клиента, объединяя текущую конфигурацию с переданными опциями.
-   * @en Creates a new client instance by merging the current configuration with provided options.
-   * @param options - Partial configuration options to extend.
+   * @ru Создаёт новый экземпляр HyperCore с расширенной/переопределённой конфигурацией.
+   * @en Creates a new HyperCore instance with extended/overridden configuration.
+   * @param options - Partial configuration overrides.
    * @returns A new HyperCore instance.
    */
   public extend(options: Partial<HttpClientOptions>): HyperCore {
-    return new HyperCore(
-      {
-        ...this.config,
-        ...options,
-        network: {
-          ...this.config.network,
-          ...options.network,
-          stealth:
-            options.network?.stealth || this.config.network?.stealth
-              ? { ...this.config.network?.stealth, ...options.network?.stealth }
-              : undefined,
-        },
-      },
-      this.transportManager.transport ?? undefined,
-    );
+    const nextConfig = { ...this.config };
+    for (const key in options) {
+      if (Object.prototype.hasOwnProperty.call(options, key)) {
+        if (key === "network" && options.network) {
+          nextConfig.network = {
+            ...this.config.network,
+            ...options.network,
+            stealth:
+              options.network.stealth || this.config.network?.stealth
+                ? {
+                    ...this.config.network?.stealth,
+                    ...options.network.stealth,
+                  }
+                : undefined,
+          };
+        } else {
+          (nextConfig as any)[key] = (options as any)[key];
+        }
+      }
+    }
+    return new HyperCore(nextConfig, this.transportManager.transport ?? undefined);
   }
 
   /**
-   * @ru Создаёт полностью новый экземпляр клиента на основе переданных опций.
-   * @en Creates a completely new client instance based on provided options.
-   * @param options - Partial configuration options for the new instance.
+   * @ru Алиас для extend().
+   * @en Alias for extend().
+   * @param options - Partial configuration overrides.
    * @returns A new HyperCore instance.
    */
   public create(options: Partial<HttpClientOptions>): HyperCore {
@@ -467,9 +548,9 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Завершает работу клиента и освобождает ресурсы (соединения, пулы).
-   * @en Shuts down the client and releases resources (connections, pools).
-   * @param graceful - If true, waits for active requests to complete before closing.
+   * @ru Завершает работу клиента и освобождает ресурсы транспорта.
+   * @en Shuts down the client and releases transport resources.
+   * @param graceful - If true, waits for active requests to complete.
    * @returns Promise that resolves when shutdown is complete.
    */
   public destroy(graceful = true): Promise<void> {
@@ -477,55 +558,50 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Выполняет GET-запрос и возвращает распарсенное JSON-тело ответа.
-   * @en Performs a GET request and returns the parsed JSON response body.
-   * @template T - Expected type of the parsed JSON.
-   * @param req - Request URL or RequestInterface object.
+   * @ru Выполняет GET-запрос и возвращает тело ответа, разобранное как JSON.
+   * @en Performs a GET request and returns the response body parsed as JSON.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
-   * @returns Promise resolving to the parsed JSON data.
+   * @returns Promise resolving to the parsed JSON value.
    */
   public json<T = unknown>(req: RequestInterface | string, signal?: AbortSignal): Promise<T> {
     return this.shortcut(req, signal).then((res) => {
-      if (res.json) return res.json<T>();
-      throw new Error("json() not supported");
+      const out = res.json ? res.json<T>() : Promise.reject(new Error("json() not supported"));
+      recycleResponse(res);
+      return out;
     });
   }
 
   /**
-   * @ru Выполняет GET-запрос и возвращает тело ответа как текст.
+   * @ru Выполняет GET-запрос и возвращает тело ответа как строку.
    * @en Performs a GET request and returns the response body as text.
-   * @param req - Request URL or RequestInterface object.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
    * @returns Promise resolving to the response text.
    */
   public text(req: RequestInterface | string, signal?: AbortSignal): Promise<string> {
     return this.shortcut(req, signal).then((res) => {
-      if (res.text) return res.text();
-      throw new Error("text() not supported");
+      const out = res.text ? res.text() : Promise.reject(new Error("text() not supported"));
+      recycleResponse(res);
+      return out;
     });
   }
 
   /**
-   * @ru Выполняет GET-запрос и немедленно отбрасывает тело ответа для освобождения ресурсов.
-   * @en Performs a GET request and immediately discards the response body to free resources.
-   * @param req - Request URL or RequestInterface object.
+   * @ru Выполняет GET-запрос и сбрасывает тело ответа (без сохранения).
+   * @en Performs a GET request and discards the response body.
+   * @param req - URL string or RequestInterface.
    * @param signal - Optional abort signal.
-   * @returns Promise that resolves when the stream is drained.
+   * @returns Promise that resolves when the body is discarded.
    */
   public dump(req: RequestInterface | string, signal?: AbortSignal): Promise<void> {
     return this.shortcut(req, signal).then((res) => {
-      if (res.dump) return res.dump();
+      const out = res.dump ? res.dump() : Promise.resolve();
+      recycleResponse(res);
+      return out;
     });
   }
 
-  /**
-   * @ru Обрабатывает ошибку диспетчеризации через конвейер плагинов обработки ошибок.
-   * @en Handles dispatch errors through the error handling plugin pipeline.
-   * @template T - Expected response body type.
-   * @param error - The error that occurred.
-   * @param req - The original internal request.
-   * @returns Promise resolving to a recovered HTTP response, or throws if unrecoverable.
-   */
   private async handleDispatchError<T>(
     error: Error,
     req: InternalRequest,
@@ -540,23 +616,11 @@ export class HyperCore implements IHyperCore {
         );
         if (recovered != null) {
           if (this.hasResponsePlugins) {
-            const meta = req.meta;
-            const reqForPipeline =
-              this.pipelines.responseSideEffects.length > 0
-                ? {
-                    ...req,
-                    meta: {
-                      ...meta,
-                      timings: meta?.timings ? { ...meta.timings } : undefined,
-                    },
-                  }
-                : req;
-
             const syncResult = executeResponsePipeline(
               this.pipelines.responseMutators,
               this.pipelines.responseSideEffects,
               recovered as HttpResponse,
-              reqForPipeline,
+              req,
               this.pluginCtx,
               this.config.logger,
             );
@@ -573,16 +637,6 @@ export class HyperCore implements IHyperCore {
     }
   }
 
-  /**
-   * @ru Создаёт или переиспользует объект InternalRequest из пула, заполняя его поля.
-   * @en Creates or reuses an InternalRequest object from the pool, populating its fields.
-   * @param method - HTTP method (GET, POST, etc.).
-   * @param req - Request URL or RequestInterface object.
-   * @param body - Optional request body data.
-   * @param signal - Optional abort signal.
-   * @param responseType - Optional response type hint ('stream').
-   * @returns The populated internal request object.
-   */
   private acquireReq(
     method: Method,
     req: RequestInterface | string,
@@ -603,11 +657,6 @@ export class HyperCore implements IHyperCore {
     );
   }
 
-  /**
-   * @ru Возвращает объект запроса в пул для переиспользования, очищая ссылки для GC.
-   * @en Returns the request object to the pool for reuse, clearing references for GC.
-   * @param req - The internal request object to recycle.
-   */
   private recycleRequest(req: InternalRequest): void {
     if (this.requestPool.length < MAX_POOL_SIZE) {
       req.method = "GET";
@@ -617,27 +666,23 @@ export class HyperCore implements IHyperCore {
       req.signal = undefined;
       req.stealth = undefined;
 
-      const m = req.meta;
+      const m = req.meta as any;
       if (m) {
         m.responseType = undefined;
+
+        if (typeof m.cleanupSignal === "function") {
+          m.cleanupSignal();
+          m.cleanupSignal = undefined;
+        }
+
         if (m.timings) {
-          for (const key in m.timings) {
-            (m.timings as any)[key] = undefined;
-          }
+          m.timings.networkMs = undefined;
         }
       }
-
       this.requestPool.push(req);
     }
   }
 
-  /**
-   * @ru Выполняет быстрый запрос с автоматическим определением HTTP-метода.
-   * @en Performs a shortcut request with automatic HTTP method detection.
-   * @param req - Request URL or RequestInterface object.
-   * @param signal - Optional abort signal.
-   * @returns Promise resolving to the HTTP response.
-   */
   private shortcut(
     req: RequestInterface | string,
     signal?: AbortSignal,

@@ -3,18 +3,10 @@ import { CURRENT_RUNTIME } from "../transports/manager.js";
 
 type TransportResponse = Awaited<ReturnType<HyperTransport["execute"]>>;
 
-/**
- * @ru Интерфейс расширенного ответа транспорта, содержащий скрытую ссылку на нативный сетевой инстанс.
- * @en Interface for extended transport response containing a hidden reference to the native network instance.
- */
 interface InternalTransportResponse extends TransportResponse {
   _raw?: FetchResponseLike;
 }
 
-/**
- * @ru Интерфейс утиной типизации для нативного ответа Fetch API или Bun-совместимого тела.
- * @en Duck-typing interface for native Fetch API response or Bun-compatible body.
- */
 interface FetchResponseLike {
   body: unknown;
   arrayBuffer(): Promise<ArrayBuffer>;
@@ -22,32 +14,20 @@ interface FetchResponseLike {
   json(): Promise<unknown>;
 }
 
-
-
+const RAW_CACHE = Symbol("hyperttp.rawCache");
 const TEXT_CACHE = Symbol("hyperttp.textCache");
 const JSON_CACHE = Symbol("hyperttp.jsonCache");
-const ARRAY_BUFFER_CACHE = Symbol("hyperttp.arrayBufferCache");
 
 type CacheHolder = {
+  [RAW_CACHE]?: Uint8Array;
   [TEXT_CACHE]?: string;
   [JSON_CACHE]?: unknown;
-  [ARRAY_BUFFER_CACHE]?: ArrayBuffer | SharedArrayBuffer;
 };
 
 const STATIC_DECODER = new TextDecoder();
-
-/**
- * @ru Замороженный пустой объект заголовков для избежания лишних аллокаций.
- * @en Frozen empty headers object to avoid redundant allocations.
- */
+const STATIC_ENCODER = new TextEncoder();
 const EMPTY_HEADERS: Readonly<Record<string, never>> = Object.freeze({});
 
-/**
- * @ru Быстрая проверка, является ли значение ReadableStream.
- * @en Fast check to determine if a value is a ReadableStream.
- * @param value - The value to check.
- * @returns True if the value is a ReadableStream.
- */
 function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
   return (
     typeof value === "object" &&
@@ -57,24 +37,15 @@ function isReadableStream(value: unknown): value is ReadableStream<Uint8Array> {
   );
 }
 
-/**
- * @ru Быстрая проверка, является ли значение Blob.
- * @en Fast check to determine if a value is a Blob.
- * @param value - The value to check.
- * @returns True if the value is a Blob.
- */
 function isBlob(value: unknown): value is Blob {
   return typeof Blob !== "undefined" && value instanceof Blob;
 }
 
 /**
- * @ru Высокопроизводительное глубокое клонирование тела ответа.
- * Избегает накладных расходов structuredClone для простых объектов.
- * @en High-performance deep cloning of the response body.
- * Avoids structuredClone overhead for simple objects.
- * @template T - The type of the body.
- * @param body - The body to clone.
- * @returns The cloned body.
+ * @ru Быстрое клонирование тела ответа с поддержкой structuredClone, JSON и ручного копирования.
+ * @en Fast response body clone supporting structuredClone, JSON, and manual copy.
+ * @param body - The body value to clone.
+ * @returns Cloned body.
  */
 export const cloneBodyFast = <T>(body: T): T => {
   if (typeof body !== "object" || body === null) return body;
@@ -90,7 +61,13 @@ export const cloneBodyFast = <T>(body: T): T => {
 
   const proto = Object.getPrototypeOf(body);
   if (proto === Object.prototype || proto === null) {
-    return { ...body } as T;
+    const target = Object.create(proto);
+    for (const key in body) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        target[key] = body[key];
+      }
+    }
+    return target as T;
   }
 
   try {
@@ -99,87 +76,98 @@ export const cloneBodyFast = <T>(body: T): T => {
     try {
       return JSON.parse(JSON.stringify(body)) as T;
     } catch {
-      return { ...body };
+      const target = Object.create(proto);
+      for (const key in body) {
+        if (Object.prototype.hasOwnProperty.call(body, key)) {
+          target[key] = body[key];
+        }
+      }
+      return target as T;
     }
   }
 };
 
 /**
- * @ru Высокопроизводительный контейнер HTTP-ответа с ленивым парсингом и кэшированием.
- * Гарантирует идентичный API чтения тела ответа во всех рантаймах.
- * @en High-performance HTTP response container with lazy parsing and caching.
- * Guarantees identical response body reading API across all runtimes.
- * @template T - Expected type of the parsed response body.
+ * @ru Реализация HttpResponse с ленивым потреблением тела, кэшированием raw/text/json и поддержкой пулинга.
+ * @en HttpResponse implementation with lazy body consumption, raw/text/json caching, and pooling support.
  */
 export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHolder {
-  public status: number;
-  public headers: Record<string, string | string[]>;
+  public status!: number;
+  public headers!: Record<string, string | string[]>;
+  public body!: T | HyperBody | Uint8Array | null;
+  public url!: string;
+  public data!: T | null;
+
+  public [RAW_CACHE]!: Uint8Array | undefined;
+  public [TEXT_CACHE]!: string | undefined;
+  public [JSON_CACHE]!: unknown | undefined;
+
+  private _bodyConsumed!: boolean;
+  private _raw!: FetchResponseLike | undefined;
+
+  constructor(rawResponse?: TransportResponse) {
+    this.status = 0;
+    this.headers = EMPTY_HEADERS;
+    this.body = null;
+    this.url = "";
+    this.data = null;
+    this[RAW_CACHE] = undefined;
+    this[TEXT_CACHE] = undefined;
+    this[JSON_CACHE] = undefined;
+    this._bodyConsumed = false;
+    this._raw = undefined;
+    if (rawResponse) this.init(rawResponse);
+  }
 
   /**
-   * @ru Тело ответа. Может быть распарсенным типом T, потоком HyperBody, буфером Uint8Array или null.
-   * @en Response body. Can be the parsed type T, a HyperBody stream, Uint8Array buffer, or null.
+   * @ru Инициализирует ответ из транспортного ответа. Сбрасывает все кэши.
+   * @en Initializes the response from a transport response. Resets all caches.
+   * @param rawResponse - The raw transport response.
+   * @returns This instance for chaining.
    */
-  public body: T | HyperBody | Uint8Array | null;
-
-  public url: string;
-  public data: T | null = null;
-
-  public [TEXT_CACHE]: string | undefined = undefined;
-  public [JSON_CACHE]: unknown | undefined = undefined;
-  public [ARRAY_BUFFER_CACHE]: ArrayBuffer | SharedArrayBuffer | undefined = undefined;
-
-  private _bodyConsumed = false;
-  private _raw: FetchResponseLike | undefined;
-
-  /**
-   * @ru Создаёт экземпляр ответа из сырых данных транспорта.
-   * @en Creates a response instance from raw transport data.
-   * @param rawResponse - The raw response from the transport layer.
-   */
-  constructor(rawResponse: TransportResponse) {
+  public init(rawResponse: TransportResponse): this {
     this.status = rawResponse.status;
     this.headers = rawResponse.headers || EMPTY_HEADERS;
     this.body = rawResponse.body as T | HyperBody | Uint8Array | null;
     this.url = rawResponse.url ?? "";
+    this.data = null;
+    this[RAW_CACHE] = undefined;
+    this[TEXT_CACHE] = undefined;
+    this[JSON_CACHE] = undefined;
+    this._bodyConsumed = false;
     this._raw = (rawResponse as InternalTransportResponse)._raw;
+    return this;
   }
 
-  /**
-   * @ru Лениво вычитывает и кэширует тело ответа в виде ArrayBuffer и текста.
-   * @en Lazily consumes and caches the response body as ArrayBuffer and text.
-   */
   private async _consumeBody(): Promise<void> {
-    if (this._bodyConsumed) return;
-    this._bodyConsumed = true;
+    if (this[RAW_CACHE] !== undefined) return;
 
     const body = this.body;
     if (!body) return;
 
-    if (typeof body === "string") {
-      this[TEXT_CACHE] = body;
+    if (body instanceof Uint8Array) {
+      this[RAW_CACHE] = body;
+      this._bodyConsumed = true;
       return;
     }
 
-    if (body instanceof Uint8Array) {
-      this[ARRAY_BUFFER_CACHE] =
-        body.buffer.byteLength === body.byteLength
-          ? body.buffer
-          : body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
-      this[TEXT_CACHE] = STATIC_DECODER.decode(body);
+    if (typeof body === "string") {
+      this[RAW_CACHE] = STATIC_ENCODER.encode(body);
+      this._bodyConsumed = true;
       return;
     }
 
     if (body instanceof ArrayBuffer) {
-      this[ARRAY_BUFFER_CACHE] = body;
-      this[TEXT_CACHE] = STATIC_DECODER.decode(body);
+      this[RAW_CACHE] = new Uint8Array(body);
+      this._bodyConsumed = true;
       return;
     }
 
     if (this._raw && body === this._raw.body && typeof this._raw.arrayBuffer === "function") {
       const buf = await this._raw.arrayBuffer();
-      this[ARRAY_BUFFER_CACHE] = buf;
-      this[TEXT_CACHE] = STATIC_DECODER.decode(buf);
-      this.body = new Uint8Array(buf) as T | HyperBody | Uint8Array | null;
+      this[RAW_CACHE] = new Uint8Array(buf);
+      this.body = this[RAW_CACHE] as T | HyperBody | Uint8Array | null;
+      this._bodyConsumed = true;
       return;
     }
 
@@ -187,9 +175,9 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       const bunBody = body as { arrayBuffer: () => Promise<ArrayBuffer> };
       if (typeof bunBody.arrayBuffer === "function") {
         const buf = await bunBody.arrayBuffer();
-        this[ARRAY_BUFFER_CACHE] = buf;
-        this[TEXT_CACHE] = STATIC_DECODER.decode(buf);
-        this.body = new Uint8Array(buf) as T | HyperBody | Uint8Array | null;
+        this[RAW_CACHE] = new Uint8Array(buf);
+        this.body = this[RAW_CACHE] as T | HyperBody | Uint8Array | null;
+        this._bodyConsumed = true;
         return;
       }
     }
@@ -200,97 +188,52 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       }
       const response = new Response(body as unknown as BodyInit);
       const buf = await response.arrayBuffer();
-      this[ARRAY_BUFFER_CACHE] = buf;
-      this[TEXT_CACHE] = STATIC_DECODER.decode(buf);
-      this.body = new Uint8Array(buf) as T | HyperBody | Uint8Array | null;
+      this[RAW_CACHE] = new Uint8Array(buf);
+      this.body = this[RAW_CACHE] as T | HyperBody | Uint8Array | null;
+      this._bodyConsumed = true;
     }
   }
 
   /**
-   * @ru Возвращает тело ответа как ArrayBuffer. Результат кэшируется.
-   * @en Returns the response body as an ArrayBuffer. Result is cached.
-   * @returns Promise resolving to the ArrayBuffer or SharedArrayBuffer.
+   * @ru Возвращает тело ответа как ArrayBuffer, потребляя его при необходимости.
+   * @en Returns the response body as ArrayBuffer, consuming it if necessary.
+   * @returns Promise resolving to an ArrayBuffer.
    */
-  public async arrayBuffer(): Promise<ArrayBuffer | SharedArrayBuffer> {
-    if (this[ARRAY_BUFFER_CACHE] !== undefined) return this[ARRAY_BUFFER_CACHE]!;
-
-    const body = this.body;
-    if (body instanceof Uint8Array) {
-      this._bodyConsumed = true;
-      return (this[ARRAY_BUFFER_CACHE] =
-        body.buffer.byteLength === body.byteLength
-          ? body.buffer
-          : body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength));
-    }
-
-    if (body instanceof ArrayBuffer) {
-      this._bodyConsumed = true;
-      return (this[ARRAY_BUFFER_CACHE] = body);
-    }
-
-    if (isBlob(body)) {
-      this._bodyConsumed = true;
-      return (this[ARRAY_BUFFER_CACHE] = await body.arrayBuffer());
-    }
-
+  public async arrayBuffer(): Promise<ArrayBuffer> {
     await this._consumeBody();
-    if (this[ARRAY_BUFFER_CACHE] === undefined) {
+    if (this[RAW_CACHE] === undefined) {
       throw new Error("[Hyperttp] Response body is not available as ArrayBuffer");
     }
-    return this[ARRAY_BUFFER_CACHE]!;
+    return this[RAW_CACHE].buffer.slice(
+      this[RAW_CACHE].byteOffset,
+      this[RAW_CACHE].byteOffset + this[RAW_CACHE].byteLength,
+    ) as ArrayBuffer;
   }
 
   /**
-   * @ru Возвращает тело ответа как текст. Результат кэшируется.
-   * @en Returns the response body as text. Result is cached.
-   * @returns Promise resolving to the text string.
+   * @ru Возвращает тело ответа как строку с кэшированием.
+   * @en Returns the response body as text with caching.
+   * @returns Promise resolving to the decoded text.
    */
   public async text(): Promise<string> {
     if (this[TEXT_CACHE] !== undefined) return this[TEXT_CACHE]!;
-
-    const body = this.body;
-    if (typeof body === "string") {
-      this._bodyConsumed = true;
-      return (this[TEXT_CACHE] = body);
-    }
-
-    if (body instanceof Uint8Array) {
-      this._bodyConsumed = true;
-      return (this[TEXT_CACHE] = STATIC_DECODER.decode(body));
-    }
-
-    if (body instanceof ArrayBuffer) {
-      this._bodyConsumed = true;
-      return (this[TEXT_CACHE] = STATIC_DECODER.decode(body));
-    }
-
-    if (isBlob(body)) {
-      this._bodyConsumed = true;
-      return (this[TEXT_CACHE] = await body.text());
-    }
-
     await this._consumeBody();
-    if (this[TEXT_CACHE] === undefined) {
+    if (this[RAW_CACHE] === undefined) {
       throw new Error("[Hyperttp] Response body is not available as text");
     }
+    this[TEXT_CACHE] = STATIC_DECODER.decode(this[RAW_CACHE]!);
     return this[TEXT_CACHE]!;
   }
 
   /**
-   * @ru Парсит тело ответа как JSON. Результат кэшируется.
-   * @en Parses the response body as JSON. Result is cached.
-   * @template TJson - Expected type of the parsed JSON.
-   * @returns Promise resolving to the parsed JSON object.
+   * @ru Возвращает тело ответа, разобранное как JSON. Для объектов возвращает их напрямую (без потребления).
+   * @en Returns the response body parsed as JSON. Returns objects directly (no consumption).
+   * @returns Promise resolving to the parsed JSON value.
    */
   public async json<TJson = T>(): Promise<TJson> {
-    if (this[JSON_CACHE] !== undefined) return this[JSON_CACHE] as TJson;
-
-    if (this[TEXT_CACHE] !== undefined) {
-      return (this[JSON_CACHE] = JSON.parse(this[TEXT_CACHE]!)) as TJson;
-    }
-
     const body = this.body;
     if (
+      !this._bodyConsumed &&
       typeof body === "object" &&
       body !== null &&
       !isReadableStream(body) &&
@@ -299,20 +242,23 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       !(body instanceof ArrayBuffer)
     ) {
       this._bodyConsumed = true;
-      return (this[JSON_CACHE] = body) as TJson;
+      return body as TJson;
     }
 
     await this._consumeBody();
-    if (this[TEXT_CACHE] !== undefined) {
-      return (this[JSON_CACHE] = JSON.parse(this[TEXT_CACHE]!)) as TJson;
+    if (this[RAW_CACHE] === undefined) {
+      throw new Error("[Hyperttp] Response body is not available as JSON");
     }
-    throw new Error("[Hyperttp] Response body is not available as JSON");
+    if (this[TEXT_CACHE] === undefined) {
+      this[TEXT_CACHE] = STATIC_DECODER.decode(this[RAW_CACHE]!);
+    }
+    return JSON.parse(this[TEXT_CACHE]!) as TJson;
   }
 
   /**
-   * @ru Отбрасывает тело ответа для освобождения ресурсов (сокета).
-   * @en Discards the response body to free up resources (socket).
-   * @returns Promise that resolves when the body is drained.
+   * @ru Сбрасывает тело ответа (для стримов — отменяет/cancel).
+   * @en Discards the response body (cancels streams).
+   * @returns Promise that resolves when the body is discarded.
    */
   public async dump(): Promise<void> {
     if (this._bodyConsumed) return;
@@ -327,15 +273,12 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
   }
 
   /**
-   * @ru Создаёт глубокую изолированную копию ответа.
-   * Для стримов использует tee() для безопасного раздвоения потока.
-   * @en Creates a deep isolated copy of the response.
-   * Uses tee() for streams to safely duplicate the flow.
-   * @returns A new HttpResponse instance with cloned data.
+   * @ru Клонирует ответ с разделением стримов через tee().
+   * @en Clones the response, splitting streams via tee().
+   * @returns A new HttpResponse instance.
    */
   public clone(): HttpResponse<T> {
-    const cloned = Object.create(HyperHttpResponse.prototype) as HyperHttpResponse<T>;
-
+    const cloned = new HyperHttpResponse<T>();
     cloned.status = this.status;
     cloned.headers = this.headers;
     cloned.url = this.url;
@@ -343,9 +286,9 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
     cloned._bodyConsumed = this._bodyConsumed;
     cloned._raw = this._bodyConsumed ? undefined : this._raw;
 
+    cloned[RAW_CACHE] = this[RAW_CACHE];
     cloned[TEXT_CACHE] = this[TEXT_CACHE];
     cloned[JSON_CACHE] = this[JSON_CACHE];
-    cloned[ARRAY_BUFFER_CACHE] = this[ARRAY_BUFFER_CACHE];
 
     if (isReadableStream(this.body) && !this._bodyConsumed) {
       if (this.body.locked) {
@@ -363,21 +306,36 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
   }
 }
 
+export const responsePool: HyperHttpResponse<any>[] = [];
+const RESPONSE_POOL_MAX = 64;
+
 /**
- * @ru Быстрое создание экземпляра HyperHttpResponse из сырого ответа транспорта.
- * @en Fast creation of a HyperHttpResponse instance from a raw transport response.
+ * @ru Создаёт HttpResponse из транспортного ответа с переиспользованием пула.
+ * @en Creates an HttpResponse from a transport response reusing the pool.
  * @param rawResponse - The raw transport response.
- * @returns A new HyperHttpResponse instance.
+ * @returns An HttpResponse instance.
  */
 export const mapResponseFast = (rawResponse: TransportResponse): HttpResponse<unknown> => {
-  return new HyperHttpResponse(rawResponse);
+  const instance = responsePool.pop() ?? new HyperHttpResponse();
+  return instance.init(rawResponse);
 };
 
 /**
- * @ru Быстрое создание объекта StreamResponse без overhead-а классов.
- * @en Fast creation of a StreamResponse object without class overhead.
+ * @ru Возвращает HttpResponse в пул переиспользования.
+ * @en Returns an HttpResponse to the reuse pool.
+ * @param res - The response to recycle.
+ */
+export const recycleResponse = (res: HttpResponse<unknown>): void => {
+  if (res instanceof HyperHttpResponse && responsePool.length < RESPONSE_POOL_MAX) {
+    responsePool.push(res);
+  }
+};
+
+/**
+ * @ru Создаёт StreamResponse без потребления тела.
+ * @en Creates a StreamResponse without consuming the body.
  * @param rawResponse - The raw transport response.
- * @returns A lightweight StreamResponse object.
+ * @returns A StreamResponse-like object.
  */
 export const mapStreamFast = (rawResponse: TransportResponse) => ({
   status: rawResponse.status,
@@ -387,21 +345,29 @@ export const mapStreamFast = (rawResponse: TransportResponse) => ({
 });
 
 /**
- * @ru Оптимизированное слияние заголовков.
- * Использует ранний возврат при первой итерации цикла, что быстрее, чем Object.keys().length > 0.
- * @en Optimized headers merging.
- * Uses early return on the first loop iteration, which is faster than Object.keys().length > 0.
- * @param base - Base headers object.
- * @param override - Headers to override or add.
- * @returns Merged headers object.
+ * @ru Быстрое слияние заголовков с мутацией базового объекта.
+ * @en Fast header merge mutating the base object.
+ * @param base - Base headers object (mutated).
+ * @param override - Optional headers to overlay.
+ * @returns The mutated base headers object.
  */
 export const mergeHeadersFast = (
   base: Record<string, string | string[]>,
   override?: Record<string, string | string[]>,
 ): Record<string, string | string[]> => {
   if (!override) return base;
+
+  let hasOverride = false;
   for (const _ in override) {
-    return { ...base, ...override };
+    hasOverride = true;
+    break;
+  }
+  if (!hasOverride) return base;
+
+  for (const key in override) {
+    if (Object.prototype.hasOwnProperty.call(override, key)) {
+      base[key] = override[key]!;
+    }
   }
   return base;
 };

@@ -1,5 +1,9 @@
 import type { HttpClientOptions } from "@hyperttp/types";
 
+/**
+ * @ru Конфигурация по умолчанию для HTTP-клиента Hyperttp.
+ * @en Default configuration for the Hyperttp HTTP client.
+ */
 export const defaultConfig: HttpClientOptions = {
   network: {
     timeout: 30000,
