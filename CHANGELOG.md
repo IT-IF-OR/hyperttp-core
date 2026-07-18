@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.5] — 2026-07-18
+
+### Fixed
+- **Critical:** `Semaphore.release()` monotonically incremented `current` when passing a slot to a queued waiter, never decrementing for the finishing request. Under load `current` grew unbounded past `max`, disabling the fast-path in `tryAcquire()`/`acquire()` and forcing every request through `new Promise()` + queue push — a cascade of allocations that overwhelmed GC and bloated heap to ~600 MB.
+
+### Changed
+- `Semaphore` rewritten with a ring buffer (pre-allocated array + `head`/`tail` indices). Eliminates `Array.push()`/`.slice()` allocations in steady state; `queue[head] = undefined` releases resolve references immediately for young-generation GC. Buffer only grows (`grow()`) on rare load spikes.
+
 ## [1.5.4] — 2026-07-18
 
 ### Fixed

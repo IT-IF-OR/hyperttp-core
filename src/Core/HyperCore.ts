@@ -36,15 +36,28 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const MAX_POOL_SIZE = 64;
 
 /**
- * @ru Семафор для ограничения конкурентных HTTP-запросов.
- * @en Semaphore for limiting concurrent HTTP requests.
+ * @ru Высокопроизводительный семафор на базе кольцевого буфера.
+ * Гарантирует отсутствие аллокаций массивов в steady-state режиме.
+ * @en High-performance semaphore backed by a ring buffer.
+ * Guarantees zero array allocations in steady state.
  */
 class Semaphore {
   private current = 0;
-  private queue: Array<() => void> = [];
-  private head = 0;
+  private readonly max: number;
 
-  constructor(private max: number) {}
+  private queue: Array<(() => void) | undefined>;
+  private capacity: number;
+  private head = 0;
+  private tail = 0;
+  private size = 0;
+
+  constructor(max: number, initialCapacity = 1024) {
+    this.max = max;
+    this.capacity = initialCapacity;
+    const arr: Array<(() => void) | undefined> = [];
+    arr.length = initialCapacity;
+    this.queue = arr;
+  }
 
   /**
    * @ru Пытается захватить слот без ожидания.
@@ -69,8 +82,15 @@ class Semaphore {
       this.current++;
       return Promise.resolve();
     }
-    return new Promise((resolve) => {
-      this.queue.push(resolve);
+
+    return new Promise<void>((resolve) => {
+      if (this.size === this.capacity) {
+        this.grow();
+      }
+
+      this.queue[this.tail] = resolve;
+      this.tail = (this.tail + 1) % this.capacity;
+      this.size++;
     });
   }
 
@@ -79,17 +99,36 @@ class Semaphore {
    * @en Releases a slot and wakes the next waiter in the queue.
    */
   release(): void {
-    if (this.head < this.queue.length) {
-      const next = this.queue[this.head++]!;
-      this.current++;
+    if (this.size > 0) {
+      const next = this.queue[this.head]!;
+      this.queue[this.head] = undefined;
+      this.head = (this.head + 1) % this.capacity;
+      this.size--;
       next();
-      if (this.head > 64) {
-        this.queue = this.queue.slice(this.head);
-        this.head = 0;
-      }
     } else {
       this.current--;
     }
+  }
+
+  /**
+   * @ru Удваивает емкость буфера при переполнении.
+   * @en Doubles buffer capacity on overflow.
+   */
+  private grow(): void {
+    const oldCapacity = this.capacity;
+    const newCapacity = oldCapacity * 2;
+
+    const newQueue: Array<(() => void) | undefined> = [];
+    newQueue.length = newCapacity;
+
+    for (let i = 0; i < this.size; i++) {
+      newQueue[i] = this.queue[(this.head + i) % oldCapacity];
+    }
+
+    this.queue = newQueue;
+    this.capacity = newCapacity;
+    this.head = 0;
+    this.tail = this.size;
   }
 }
 
