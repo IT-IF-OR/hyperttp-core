@@ -11,67 +11,53 @@ import { normalizeBody, normalizeUrl } from "../utils/normalize.js";
 import { mergeHeadersFast } from "../utils/response.js";
 
 /**
- * @ru Менеджер переиспользуемых AbortController для устранения аллокаций при тайм-аутах.
- * @en Reusable AbortController manager to eliminate allocations on timeouts.
+ * @ru Создаёт AbortSignal с тайм-аутом и привязкой к пользовательскому сигналу отмены.
+ * @en Creates an AbortSignal with timeout and user abort signal binding.
+ * @param userSignal - Optional external abort signal.
+ * @param timeoutMs - Timeout in milliseconds.
+ * @param meta - Metadata object receiving cleanup function.
+ * @returns AbortSignal bound to the timeout and user signal.
  */
-class AbortHandlerManager {
-  public activeControllers: AbortController[] = [];
+function createTimeoutSignal(
+  userSignal: AbortSignal | undefined,
+  timeoutMs: number,
+  meta: any,
+): AbortSignal {
+  const controller = new AbortController();
 
-  constructor() {
-    for (let i = 0; i < 64; i++) {
-      this.activeControllers.push(new AbortController());
-    }
-  }
-
-  /**
-   * @ru Захватывает контроллер из пула, настраивает тайм-аут и пользовательский сигнал.
-   * @en Acquires a controller from the pool, sets up timeout and user signal.
-   * @param userSignal - Optional external abort signal.
-   * @param timeoutMs - Timeout in milliseconds.
-   * @param meta - Metadata object receiving cleanup function.
-   * @returns AbortSignal bound to the timeout and user signal.
-   */
-  public acquire(userSignal: AbortSignal | undefined, timeoutMs: number, meta: any): AbortSignal {
-    const controller = this.activeControllers.pop() ?? new AbortController();
-
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-
-      if (userSignal) {
-        userSignal.removeEventListener("abort", onUserAbort);
-      }
-      clearTimeout(timeoutId);
-
-      this.activeControllers.push(controller);
-    };
-
-    const timeoutId = setTimeout(() => {
-      controller.abort(new DOMException("Timeout", "TimeoutError"));
-      cleanup();
-    }, timeoutMs);
-
-    const onUserAbort = () => {
-      controller.abort(userSignal?.reason);
-      cleanup();
-    };
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
 
     if (userSignal) {
-      userSignal.addEventListener("abort", onUserAbort);
+      userSignal.removeEventListener("abort", onUserAbort);
     }
+    clearTimeout(timeoutId);
+  };
 
-    meta.cleanupSignal = cleanup;
+  const timeoutId = setTimeout(() => {
+    controller.abort(new DOMException("Timeout", "TimeoutError"));
+    cleanup();
+  }, timeoutMs);
 
-    return controller.signal;
+  const onUserAbort = () => {
+    controller.abort(userSignal?.reason);
+    cleanup();
+  };
+
+  if (userSignal) {
+    userSignal.addEventListener("abort", onUserAbort);
   }
+
+  meta.cleanupSignal = cleanup;
+
+  return controller.signal;
 }
 
-const abortManager = new AbortHandlerManager();
-
 /**
- * @ru Применяет тайм-аут к сигналу отмены через пул переиспользуемых контроллеров.
- * @en Applies a timeout to the abort signal via a pool of reusable controllers.
+ * @ru Применяет тайм-аут к сигналу отмены.
+ * @en Applies a timeout to the abort signal.
  * @param signal - Optional external abort signal.
  * @param timeout - Timeout in milliseconds (skip if null/<=0).
  * @param meta - Metadata object receiving cleanup function.
@@ -83,7 +69,7 @@ function applyTimeout(
   meta: any,
 ): AbortSignal | undefined {
   if (timeout == null || timeout <= 0) return signal;
-  return abortManager.acquire(signal, timeout, meta);
+  return createTimeoutSignal(signal, timeout, meta);
 }
 
 /**

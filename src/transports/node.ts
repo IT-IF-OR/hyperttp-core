@@ -363,7 +363,10 @@ export class NodeTransport implements HyperTransport {
   public config: NodeTransportConfig;
   private readonly isProduction: boolean;
   private readonly cleanBaseUrl: string;
-  private readonly agentCache = new CacheManager<http.Agent | https.Agent>({ maxSize: 32, ttl: 60_000 });
+  private readonly agentCache = new CacheManager<http.Agent | https.Agent>({
+    maxSize: 32,
+    ttl: 60_000,
+  });
   private readonly trackedAgents = new Set<http.Agent | https.Agent>();
 
   constructor(config: NodeTransportConfig) {
