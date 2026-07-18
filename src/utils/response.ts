@@ -204,10 +204,7 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
     if (this[RAW_CACHE] === undefined) {
       throw new Error("[Hyperttp] Response body is not available as ArrayBuffer");
     }
-    return this[RAW_CACHE].buffer.slice(
-      this[RAW_CACHE].byteOffset,
-      this[RAW_CACHE].byteOffset + this[RAW_CACHE].byteLength,
-    ) as ArrayBuffer;
+    return this[RAW_CACHE].buffer as ArrayBuffer;
   }
 
   /**
@@ -253,6 +250,23 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       this[TEXT_CACHE] = STATIC_DECODER.decode(this[RAW_CACHE]!);
     }
     return JSON.parse(this[TEXT_CACHE]!) as TJson;
+  }
+
+  /**
+   * @ru Полный сброс состояния для переиспользования в пуле. Очищает все кэши и приватные поля.
+   * @en Full state reset for pool reuse. Clears all caches and private fields.
+   */
+  public reset(): void {
+    this.status = 0;
+    this.headers = EMPTY_HEADERS;
+    this.body = null;
+    this.url = "";
+    this.data = null;
+    this[RAW_CACHE] = undefined;
+    this[TEXT_CACHE] = undefined;
+    this[JSON_CACHE] = undefined;
+    this._bodyConsumed = false;
+    this._raw = undefined;
   }
 
   /**
@@ -327,6 +341,7 @@ export const mapResponseFast = (rawResponse: TransportResponse): HttpResponse<un
  */
 export const recycleResponse = (res: HttpResponse<unknown>): void => {
   if (res instanceof HyperHttpResponse && responsePool.length < RESPONSE_POOL_MAX) {
+    res.reset();
     responsePool.push(res);
   }
 };

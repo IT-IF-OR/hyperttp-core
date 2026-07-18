@@ -42,6 +42,7 @@ const MAX_POOL_SIZE = 64;
 class Semaphore {
   private current = 0;
   private queue: Array<() => void> = [];
+  private head = 0;
 
   constructor(private max: number) {}
 
@@ -69,10 +70,7 @@ class Semaphore {
       return Promise.resolve();
     }
     return new Promise((resolve) => {
-      this.queue.push(() => {
-        this.current++;
-        resolve();
-      });
+      this.queue.push(resolve);
     });
   }
 
@@ -81,9 +79,14 @@ class Semaphore {
    * @en Releases a slot and wakes the next waiter in the queue.
    */
   release(): void {
-    const next = this.queue.shift();
-    if (next) {
+    if (this.head < this.queue.length) {
+      const next = this.queue[this.head++]!;
+      this.current++;
       next();
+      if (this.head > 64) {
+        this.queue = this.queue.slice(this.head);
+        this.head = 0;
+      }
     } else {
       this.current--;
     }

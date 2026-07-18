@@ -7,6 +7,7 @@ import type {
   TransportResponse,
   TransportResponsePayload,
 } from "@hyperttp/types";
+import { CacheManager } from "hcacher";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -160,7 +161,8 @@ function applyStealthHeaders(
 function getNativeAgent(
   isHttps: boolean,
   stealth: StealthOptions | undefined,
-  cache: LRUMap<http.Agent | https.Agent>,
+  cache: CacheManager<http.Agent | https.Agent>,
+  trackedAgents: Set<http.Agent | https.Agent>,
   rejectUnauthorized?: boolean,
 ): http.Agent | https.Agent {
   const fingerprint = stealth?.fingerprint ?? "none";
@@ -276,6 +278,7 @@ function getNativeAgent(
   }
 
   cache.set(cacheKey, agent);
+  trackedAgents.add(agent);
   return agent;
 }
 
@@ -352,42 +355,6 @@ function createSizeLimitTransform(maxBytes: number): Transform {
   });
 }
 
-class LRUMap<V> {
-  private map = new Map<string, V>();
-  constructor(private max: number) {}
-  get(key: string): V | undefined {
-    const val = this.map.get(key);
-    if (val !== undefined) {
-      this.map.delete(key);
-      this.map.set(key, val);
-    }
-    return val;
-  }
-  set(key: string, val: V): void {
-    this.map.delete(key);
-    this.map.set(key, val);
-    if (this.map.size > this.max) {
-      const oldest = this.map.keys().next().value;
-      if (oldest !== undefined) {
-        const evicted = this.map.get(oldest);
-        if (evicted && typeof (evicted as any).destroy === "function") {
-          (evicted as any).destroy();
-        }
-        this.map.delete(oldest);
-      }
-    }
-  }
-  values(): IterableIterator<V> {
-    return this.map.values();
-  }
-  clear(): void {
-    for (const v of this.map.values()) {
-      if (typeof (v as any).destroy === "function") (v as any).destroy();
-    }
-    this.map.clear();
-  }
-}
-
 /**
  * @ru Реализация транспорта для Node.js с использованием нативных http/https модулей.
  * Поддерживает stealth-маскировку, фрагментацию TLS Client Hello и автоматическую декомпрессию.
@@ -396,7 +363,8 @@ export class NodeTransport implements HyperTransport {
   public config: NodeTransportConfig;
   private readonly isProduction: boolean;
   private readonly cleanBaseUrl: string;
-  private readonly agentCache = new LRUMap<http.Agent | https.Agent>(32);
+  private readonly agentCache = new CacheManager<http.Agent | https.Agent>({ maxSize: 32, ttl: 60_000 });
+  private readonly trackedAgents = new Set<http.Agent | https.Agent>();
 
   constructor(config: NodeTransportConfig) {
     this.config = config;
@@ -431,6 +399,7 @@ export class NodeTransport implements HyperTransport {
       isHttps,
       stealthOpts,
       this.agentCache,
+      this.trackedAgents,
       this.config.network?.rejectUnauthorized,
     );
 
@@ -531,16 +500,18 @@ export class NodeTransport implements HyperTransport {
   }
 
   public async close(): Promise<void> {
-    for (const agent of this.agentCache.values()) {
+    for (const agent of this.trackedAgents) {
       agent.destroy();
     }
+    this.trackedAgents.clear();
     this.agentCache.clear();
   }
 
   public async destroy(): Promise<void> {
-    for (const agent of this.agentCache.values()) {
+    for (const agent of this.trackedAgents) {
       agent.destroy();
     }
+    this.trackedAgents.clear();
     this.agentCache.clear();
   }
 }

@@ -1,4 +1,5 @@
 import type { Method, RequestBodyData } from "@hyperttp/types";
+import { CacheManager } from "hcacher";
 
 type NormalizedHeaders = Record<string, string | string[]>;
 
@@ -23,8 +24,7 @@ for (let i = 0; i < singleHeaders.length; i++) {
   SINGLE_VALUE_HEADERS[singleHeaders[i]!] = 1;
 }
 
-const HEADER_CACHE_LIMIT = 2048;
-const HEADER_KEY_CACHE: Record<string, string> = Object.create(null);
+const HEADER_KEY_CACHE = new CacheManager<string>({ maxSize: 2048, ttl: 60_000 });
 
 const COMMON_HEADERS = [
   "accept",
@@ -59,20 +59,15 @@ const COMMON_HEADERS = [
 
 for (let i = 0; i < COMMON_HEADERS.length; i++) {
   const lower = COMMON_HEADERS[i]!;
-  HEADER_KEY_CACHE[lower] = lower;
+  HEADER_KEY_CACHE.set(lower, lower);
 }
 
-let cacheSize = COMMON_HEADERS.length;
-
 function fastLowercaseKey(key: string): string {
-  const cached = HEADER_KEY_CACHE[key];
+  const cached = HEADER_KEY_CACHE.get(key);
   if (cached !== undefined) return cached;
 
   const lower = key.toLowerCase();
-  if (cacheSize < HEADER_CACHE_LIMIT) {
-    HEADER_KEY_CACHE[key] = lower;
-    cacheSize++;
-  }
+  HEADER_KEY_CACHE.set(key, lower);
   return lower;
 }
 

@@ -6,6 +6,7 @@ import type {
   Method,
   ResponseType,
 } from "@hyperttp/types";
+import { CacheManager } from "hcacher";
 import { normalizeBody, normalizeUrl } from "../utils/normalize.js";
 import { mergeHeadersFast } from "../utils/response.js";
 
@@ -90,10 +91,7 @@ function applyTimeout(
  * @en Internal request builder with URL caching and object pooling.
  */
 export class RequestBuilder {
-  private urlCache: Record<string, string> = Object.create(null);
-  private cacheKeys: string[] = Array.from({ length: 512 });
-  private cacheIndex = 0;
-  private readonly MAX_CACHE_SIZE = 512;
+  private readonly urlCache = new CacheManager<string>({ maxSize: 512, ttl: 60_000 });
 
   /**
    * @ru Собирает InternalRequest из публичного API-вызова, переиспользуя пулированный объект.
@@ -168,21 +166,21 @@ export class RequestBuilder {
 
     if (req.query) {
       const cacheKey = rawUrl + "_base";
-      let baseUrl = this.urlCache[cacheKey];
+      let baseUrl = this.urlCache.get(cacheKey);
 
       if (!baseUrl) {
         baseUrl = config.baseURL ? new URL(rawUrl, config.baseURL).href : new URL(rawUrl).href;
-        this.writeToCache(cacheKey, baseUrl);
+        this.urlCache.set(cacheKey, baseUrl);
       }
 
       const urlObj = new URL(baseUrl);
       this.appendQueryParams(urlObj, req.query);
       finalUrl = urlObj.href;
     } else {
-      let cachedUrl = this.urlCache[rawUrl];
+      let cachedUrl = this.urlCache.get(rawUrl);
       if (!cachedUrl) {
         cachedUrl = config.baseURL ? new URL(rawUrl, config.baseURL).href : new URL(rawUrl).href;
-        this.writeToCache(rawUrl, cachedUrl);
+        this.urlCache.set(rawUrl, cachedUrl);
       }
       finalUrl = cachedUrl;
     }
@@ -236,7 +234,7 @@ export class RequestBuilder {
   public resolveUrl(url: string, baseURL?: string): string {
     if (!url) throw new Error("[HyperCore] URL is undefined");
 
-    let finalUrl = this.urlCache[url];
+    let finalUrl = this.urlCache.get(url);
     if (finalUrl) return finalUrl;
 
     const isAbsolute = url.startsWith("http://") || url.startsWith("https://");
@@ -246,18 +244,8 @@ export class RequestBuilder {
       finalUrl = baseURL ? new URL(url, baseURL).href : new URL(url).href;
     }
 
-    this.writeToCache(url, finalUrl);
+    this.urlCache.set(url, finalUrl);
     return finalUrl;
-  }
-
-  private writeToCache(key: string, value: string): void {
-    const oldKey = this.cacheKeys[this.cacheIndex];
-    if (oldKey !== undefined) {
-      delete this.urlCache[oldKey];
-    }
-    this.urlCache[key] = value;
-    this.cacheKeys[this.cacheIndex] = key;
-    this.cacheIndex = (this.cacheIndex + 1) % this.MAX_CACHE_SIZE;
   }
 
   private appendQueryParams(url: URL, query: Record<string, unknown>): void {
