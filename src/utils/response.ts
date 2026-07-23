@@ -201,19 +201,26 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
    */
   public async arrayBuffer(): Promise<ArrayBuffer> {
     await this._consumeBody();
-    if (this[RAW_CACHE] === undefined) {
+    const raw = this[RAW_CACHE];
+    if (raw === undefined) {
       throw new Error("[Hyperttp] Response body is not available as ArrayBuffer");
     }
-    return this[RAW_CACHE].buffer as ArrayBuffer;
+    if (raw.byteOffset === 0 && raw.byteLength === raw.buffer.byteLength) {
+      return raw.buffer as ArrayBuffer;
+    }
+    return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer;
   }
 
-  /**
-   * @ru Возвращает тело ответа как строку с кэшированием.
-   * @en Returns the response body as text with caching.
-   * @returns Promise resolving to the decoded text.
-   */
   public async text(): Promise<string> {
     if (this[TEXT_CACHE] !== undefined) return this[TEXT_CACHE]!;
+
+    if (this._raw && typeof this._raw.text === "function" && !this._bodyConsumed) {
+      this._bodyConsumed = true;
+      const text = await this._raw.text();
+      this[TEXT_CACHE] = text;
+      return text;
+    }
+
     await this._consumeBody();
     if (this[RAW_CACHE] === undefined) {
       throw new Error("[Hyperttp] Response body is not available as text");
@@ -228,6 +235,8 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
    * @returns Promise resolving to the parsed JSON value.
    */
   public async json<TJson = T>(): Promise<TJson> {
+    if (this[JSON_CACHE] !== undefined) return this[JSON_CACHE] as TJson;
+
     const body = this.body;
     if (
       !this._bodyConsumed &&
@@ -236,10 +245,21 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
       !isReadableStream(body) &&
       !isBlob(body) &&
       !(body instanceof Uint8Array) &&
-      !(body instanceof ArrayBuffer)
+      !(body instanceof ArrayBuffer) &&
+      !("arrayBuffer" in body) &&
+      !("text" in body) &&
+      !("json" in body)
     ) {
       this._bodyConsumed = true;
+      this[JSON_CACHE] = body;
       return body as TJson;
+    }
+
+    if (this._raw && typeof this._raw.json === "function" && !this._bodyConsumed) {
+      this._bodyConsumed = true;
+      const parsed = (await this._raw.json()) as TJson;
+      this[JSON_CACHE] = parsed;
+      return parsed;
     }
 
     await this._consumeBody();
@@ -249,7 +269,9 @@ export class HyperHttpResponse<T = unknown> implements HttpResponse<T>, CacheHol
     if (this[TEXT_CACHE] === undefined) {
       this[TEXT_CACHE] = STATIC_DECODER.decode(this[RAW_CACHE]!);
     }
-    return JSON.parse(this[TEXT_CACHE]!) as TJson;
+    const parsed = JSON.parse(this[TEXT_CACHE]!) as TJson;
+    this[JSON_CACHE] = parsed;
+    return parsed;
   }
 
   /**
@@ -371,13 +393,6 @@ export const mergeHeadersFast = (
   override?: Record<string, string | string[]>,
 ): Record<string, string | string[]> => {
   if (!override) return base;
-
-  let hasOverride = false;
-  for (const _ in override) {
-    hasOverride = true;
-    break;
-  }
-  if (!hasOverride) return base;
 
   for (const key in override) {
     if (Object.prototype.hasOwnProperty.call(override, key)) {

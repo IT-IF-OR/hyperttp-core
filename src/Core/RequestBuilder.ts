@@ -37,6 +37,7 @@ function createTimeoutSignal(
   };
 
   const timeoutId = setTimeout(() => {
+    (controller.signal as any).isTimeout = true;
     controller.abort(new DOMException("Timeout", "TimeoutError"));
     cleanup();
   }, timeoutMs);
@@ -47,7 +48,11 @@ function createTimeoutSignal(
   };
 
   if (userSignal) {
-    userSignal.addEventListener("abort", onUserAbort);
+    if (userSignal.aborted) {
+      onUserAbort();
+    } else {
+      userSignal.addEventListener("abort", onUserAbort);
+    }
   }
 
   meta.cleanupSignal = cleanup;
@@ -72,26 +77,9 @@ function applyTimeout(
   return createTimeoutSignal(signal, timeout, meta);
 }
 
-/**
- * @ru Строитель внутренних запросов с кэшированием URL и пулом объектов.
- * @en Internal request builder with URL caching and object pooling.
- */
 export class RequestBuilder {
   private readonly urlCache = new CacheManager<string>({ maxSize: 512, ttl: 60_000 });
 
-  /**
-   * @ru Собирает InternalRequest из публичного API-вызова, переиспользуя пулированный объект.
-   * @en Builds an InternalRequest from a public API call, reusing a pooled object.
-   * @param method - HTTP method.
-   * @param req - URL string or RequestInterface object.
-   * @param body - Optional request body.
-   * @param signal - Optional abort signal.
-   * @param responseType - Response type hint ("stream" or undefined).
-   * @param defaultHeaders - Default headers to apply.
-   * @param config - Client configuration.
-   * @param pooled - Optional pre-allocated InternalRequest to reuse.
-   * @returns The built InternalRequest.
-   */
   build(
     method: Method,
     req: RequestInterface | string,
@@ -130,10 +118,7 @@ export class RequestBuilder {
       internalReq.url = this.resolveUrl(req, config.baseURL);
 
       if (body !== undefined) {
-        internalReq.headers = Object.create(null);
-        for (const k in defaultHeaders) {
-          internalReq.headers[k] = defaultHeaders[k]!;
-        }
+        internalReq.headers = Object.assign({}, defaultHeaders);
       } else {
         internalReq.headers = defaultHeaders;
       }
@@ -159,9 +144,7 @@ export class RequestBuilder {
         this.urlCache.set(cacheKey, baseUrl);
       }
 
-      const urlObj = new URL(baseUrl);
-      this.appendQueryParams(urlObj, req.query);
-      finalUrl = urlObj.href;
+      finalUrl = this.appendQueryString(baseUrl, req.query);
     } else {
       let cachedUrl = this.urlCache.get(rawUrl);
       if (!cachedUrl) {
@@ -174,17 +157,18 @@ export class RequestBuilder {
     internalReq.method = method;
     internalReq.url = finalUrl;
 
-    if (req.headers) {
-      const targetHeaders = Object.create(null);
-      for (const k in defaultHeaders) {
-        targetHeaders[k] = defaultHeaders[k]!;
-      }
-      internalReq.headers = mergeHeadersFast(targetHeaders, req.headers);
+    const finalBody = req.body ?? body;
+
+    if (req.headers || finalBody !== undefined) {
+      const targetHeaders = Object.assign({}, defaultHeaders);
+      internalReq.headers = req.headers
+        ? mergeHeadersFast(targetHeaders, req.headers)
+        : targetHeaders;
     } else {
       internalReq.headers = defaultHeaders;
     }
 
-    internalReq.body = normalizeBody(method, req.body ?? body);
+    internalReq.body = normalizeBody(method, finalBody);
     internalReq.signal = applyTimeout(req.signal ?? signal, config.network?.timeout, metaObj);
 
     metaObj.responseType =
@@ -192,13 +176,7 @@ export class RequestBuilder {
 
     if (req.stealth) {
       if (config.network?.stealth) {
-        const nextStealth = Object.create(null);
-        for (const k in config.network.stealth) {
-          nextStealth[k] = (config.network.stealth as any)[k];
-        }
-        for (const k in req.stealth) {
-          nextStealth[k] = (req.stealth as any)[k];
-        }
+        const nextStealth = Object.assign({}, config.network.stealth, req.stealth);
         internalReq.stealth = nextStealth;
       } else {
         internalReq.stealth = req.stealth;
@@ -210,13 +188,6 @@ export class RequestBuilder {
     return internalReq;
   }
 
-  /**
-   * @ru Разрешает URL относительно baseURL с кэшированием результата.
-   * @en Resolves a URL against baseURL with result caching.
-   * @param url - URL to resolve (absolute or relative).
-   * @param baseURL - Optional base URL.
-   * @returns The resolved absolute URL.
-   */
   public resolveUrl(url: string, baseURL?: string): string {
     if (!url) throw new Error("[HyperCore] URL is undefined");
 
@@ -234,17 +205,23 @@ export class RequestBuilder {
     return finalUrl;
   }
 
-  private appendQueryParams(url: URL, query: Record<string, unknown>): void {
+  private appendQueryString(baseUrl: string, query: Record<string, unknown>): string {
+    let qs = "";
     for (const k in query) {
-      if (Object.prototype.hasOwnProperty.call(query, k)) {
-        const v = query[k];
-        if (v == null) continue;
-        if (Array.isArray(v)) {
-          for (let j = 0; j < v.length; j++) url.searchParams.append(k, String(v[j]));
-        } else {
-          url.searchParams.set(k, String(v));
+      if (!Object.prototype.hasOwnProperty.call(query, k)) continue;
+      const v = query[k];
+      if (v == null) continue;
+      if (Array.isArray(v)) {
+        for (let j = 0; j < v.length; j++) {
+          if (qs) qs += "&";
+          qs += encodeURIComponent(k) + "=" + encodeURIComponent(String(v[j]));
         }
+      } else {
+        if (qs) qs += "&";
+        qs += encodeURIComponent(k) + "=" + encodeURIComponent(String(v));
       }
     }
+    if (!qs) return baseUrl;
+    return baseUrl + (baseUrl.includes("?") ? "&" : "?") + qs;
   }
 }

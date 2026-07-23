@@ -12,9 +12,12 @@ const DEFAULT_RETRY_STATUS_CODES = new Set<number>([502, 503, 504]);
  */
 export function calcDelay(attempt: number, retryOptions: RetryOptions): number {
   const { baseDelay = 1000, maxDelay = 10000, jitter = true } = retryOptions;
-  const safeAttempt = Math.min(attempt, 31);
-  const base = Math.min(baseDelay * Math.pow(2, safeAttempt), maxDelay);
+  // Capping at 10 (2^10 = 1024), since baseDelay * 1024 exceeds maxDelay in 99% of cases
+  const safeAttempt = Math.min(Math.max(0, attempt), 10);
+  const base = Math.min(baseDelay * (1 << safeAttempt), maxDelay);
+
   if (!jitter) return base;
+
   const jittered = base * (0.75 + Math.random() * 0.5);
   return Math.min(Math.max(0, jittered), maxDelay);
 }
@@ -50,7 +53,7 @@ export async function drainBody(body: unknown): Promise<void> {
 
     if (typeof stream.getReader === "function") {
       const reader = (stream as unknown as ReadableStream).getReader();
-      reader.cancel();
+      await reader.cancel().catch(() => {});
     }
   } catch {
     //

@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.5.6] — 2026-07-23
+
+### Fixed
+- **Critical:** fixed global `defaultHeaders` mutation when creating requests with a body or custom headers. Headers are now cloned on demand, preventing `Content-Type: application/json` from leaking into subsequent requests.
+- **Critical:** fixed potential raw memory exposure in `HyperHttpResponse.arrayBuffer()` when reading subarray/view buffers (e.g., from Node.js/Bun buffer pools). Safely slices the underlying buffer when `byteOffset` or `byteLength` does not match the parent buffer.
+- Fixed repeated `res.json()` calls throwing `Response body is not available as JSON` by properly populating and returning the cached result from `JSON_CACHE`.
+- Fixed race condition where requests queued in `Semaphore` would still trigger transport execution even if their `AbortSignal` was aborted while waiting for a slot.
+- Fixed user-initiated `AbortSignal` cancellations being incorrectly overridden and re-thrown as `TimeoutError`. Added explicit `isTimeout` tracking on signal controllers.
+- Fixed unhandled promise rejection in `drainBody()` when cancelling `ReadableStream` readers during body cleanup.
+- Fixed prototype chain breakdown during bundling/transpilation for `HttpClientError` and `TimeoutError` using `Object.setPrototypeOf`.
+
+### Changed
+- Replaced `new URL()` and `searchParams` with fast manual query string serialization (`appendQueryString`) in `RequestBuilder`, bypassing C++ binding overhead on hot paths while correctly handling existing `?`/`&` delimiters.
+- Replaced `CacheManager` in `normalize.ts` (`fastLowercaseKey`) with a lightweight, flat `Object.create(null)` dictionary map, eliminating TTL/LRU tracking overhead for finite HTTP header keys.
+- Streamlined transport loading in `loadCtor` by eliminating redundant `import.meta.resolve` checks before dynamic `import()`.
+- Optimized `TransportManager` lifecycle methods (`destroy`, `setConfig`) with direct type-safe method checks.
+- Optimized `calcDelay()` in `retryUtils.ts` by replacing floating-point `Math.pow()` with bitwise shift operations (`1 << attempt`).
+- Optimized `deepMerge()` by replacing `Object.prototype.toString.call()` with fast direct object checks and removing `Object.keys()` array allocations in favor of `for...in` loops.
+
+### Security
+- Added Prototype Pollution protection in `deepMerge()` by filtering out `__proto__`, `constructor`, and `prototype` keys during recursive merging.
+
+### Added
+- Added static type guards `HttpClientError.isHttpClientError()` and `TimeoutError.isTimeoutError()` for safe error validation across worker thread and bundle boundaries.
+
 ## [1.5.5] — 2026-07-18
 
 ### Fixed

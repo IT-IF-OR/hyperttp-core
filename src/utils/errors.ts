@@ -17,6 +17,17 @@ export class HttpClientError extends Error {
   ) {
     super(message, originalError ? { cause: originalError } : undefined);
     this.name = "HttpClientError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  /**
+   * @ru Проверяет, является ли ошибка экземпляром HttpClientError (безопасно для разрозненных бандлов).
+   * @en Checks if an error is an HttpClientError instance (bundle boundary safe).
+   */
+  public static isHttpClientError(err: unknown): err is HttpClientError {
+    return (
+      err instanceof HttpClientError || (err instanceof Error && (err as any).code === "HTTP_ERROR")
+    );
   }
 }
 
@@ -32,5 +43,14 @@ export class TimeoutError extends HttpClientError {
   constructor(url: string, timeout: number) {
     super(`Timeout after ${timeout}ms`, "TIMEOUT", 408, undefined, url);
     this.name = "TimeoutError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+
+  /**
+   * @ru Проверяет, является ли ошибка экземпляром TimeoutError.
+   * @en Checks if an error is a TimeoutError instance.
+   */
+  public static isTimeoutError(err: unknown): err is TimeoutError {
+    return err instanceof TimeoutError || (err instanceof Error && (err as any).code === "TIMEOUT");
   }
 }

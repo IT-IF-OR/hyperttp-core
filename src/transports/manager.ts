@@ -167,9 +167,7 @@ function logDebugFallback(pkg: string, err: unknown, config?: HttpClientOptions)
 
 /**
  * @ru Загружает конструктор транспорта из пакета или относительного пути.
- * Для браузерной среды использует статический импорт для совместимости с бандлерами.
  * @en Loads a transport constructor from a package or relative path.
- * For browser runtime, uses static import for bundler compatibility.
  * @param pkg - Package name or relative path.
  * @param exportName - Name of the exported transport class.
  * @param config - Optional client configuration for debug logging.
@@ -185,27 +183,8 @@ async function loadCtor(
     throw new Error(`[Hyperttp Security] Blocked untrusted transport import attempt: ${pkg}`);
   }
 
-  if (CURRENT_RUNTIME === "browser") {
-    if (pkg !== "./browser.js") return null;
-    const mod = (await import("./browser.js")) as Record<string, unknown>;
-    const candidate = mod[exportName] ?? mod.default;
-    return typeof candidate === "function" ? (candidate as TransportCtor) : null;
-  }
-
-  let specifier = pkg;
   try {
-    if (typeof import.meta.resolve === "function") {
-      specifier = import.meta.resolve(pkg, import.meta.url);
-    }
-  } catch (err) {
-    if (isModuleNotFoundError(err)) {
-      logDebugFallback(pkg, err, config);
-      return null;
-    }
-  }
-
-  try {
-    const mod = (await import(specifier)) as Record<string, unknown>;
+    const mod = (await import(pkg)) as Record<string, unknown>;
     const candidate = mod[exportName] ?? mod.default;
     return typeof candidate === "function" ? (candidate as TransportCtor) : null;
   } catch (err) {
@@ -248,7 +227,7 @@ export async function resolveTransport(config: HttpClientOptions): Promise<Hyper
         failures.push(`${t.pkg} (not installed)`);
         continue;
       }
-      throw new Error(`[Hyperttp] transport crash in ${t.pkg}: ${(err as Error)?.message}`, {
+      throw new Error(`[Hyperttp] Transport crash in ${t.pkg}: ${(err as Error)?.message}`, {
         cause: err,
       });
     }
@@ -347,13 +326,9 @@ export class TransportManager {
   public setConfig(config: HttpClientOptions): void {
     this.config = config;
 
-    if (this.transport && "setConfig" in this.transport) {
-      const dynamicTarget = this.transport as {
-        setConfig: (config: HttpClientOptions) => void;
-      };
-      if (typeof dynamicTarget.setConfig === "function") {
-        dynamicTarget.setConfig(config);
-      }
+    const t = this.transport as { setConfig?: (cfg: HttpClientOptions) => void } | null;
+    if (typeof t?.setConfig === "function") {
+      t.setConfig(config);
     }
   }
 
@@ -366,22 +341,20 @@ export class TransportManager {
    * @returns Promise that resolves when shutdown is complete.
    */
   public async destroy(graceful = true): Promise<void> {
-    const t = this.transport;
+    const t = this.transport as {
+      close?: () => Promise<void> | void;
+      destroy?: () => Promise<void> | void;
+    } | null;
+
     if (!t) return;
 
     try {
-      if (graceful && "close" in t) {
-        const closable = t as { close: () => Promise<void> | void };
-        if (typeof closable.close === "function") {
-          await closable.close();
-          return;
-        }
+      if (graceful && typeof t.close === "function") {
+        await t.close();
+        return;
       }
-      if ("destroy" in t) {
-        const destroyable = t as { destroy: () => Promise<void> | void };
-        if (typeof destroyable.destroy === "function") {
-          await destroyable.destroy();
-        }
+      if (typeof t.destroy === "function") {
+        await t.destroy();
       }
     } finally {
       this.transport = null;

@@ -240,6 +240,11 @@ export class HyperCore implements IHyperCore {
           if (!acquired) await this.semaphore.acquire();
           acquired = true;
         }
+
+        if (req.signal?.aborted) {
+          throw req.signal.reason ?? new DOMException("Aborted", "AbortError");
+        }
+
         let rawResponse: TransportResponse;
         const meta = req.meta as {
           responseType?: ResponseType;
@@ -293,9 +298,12 @@ export class HyperCore implements IHyperCore {
         this.recycleRequest(req);
         return response as HttpResponse<T>;
       } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          const timeout = this.config.network?.timeout;
-          if (timeout != null && timeout > 0) {
+        if (
+          error instanceof Error &&
+          (error.name === "AbortError" || error.name === "TimeoutError")
+        ) {
+          if (req.signal && (req.signal as any).isTimeout) {
+            const timeout = this.config.network?.timeout ?? 0;
             return this.handleDispatchError(new TimeoutError(req.url, timeout), req);
           }
           return this.handleDispatchError(error, req);
@@ -526,7 +534,7 @@ export class HyperCore implements IHyperCore {
     req: RequestInterface | string,
     signal?: AbortSignal,
   ): Promise<StreamResponse<unknown>> {
-    return this.dispatch(this.acquireReq("GET", req, undefined, signal, "stream")) as Promise<
+    return this.dispatch(this.acquireReq("GET", req, undefined, signal)) as Promise<
       StreamResponse<unknown>
     >;
   }
@@ -544,9 +552,7 @@ export class HyperCore implements IHyperCore {
     body?: RequestBodyData,
     signal?: AbortSignal,
   ): Promise<StreamResponse<T>> {
-    return this.dispatch(this.acquireReq("POST", req, body, signal, "stream")) as Promise<
-      StreamResponse<T>
-    >;
+    return this.dispatch(this.acquireReq("POST", req, body, signal)) as Promise<StreamResponse<T>>;
   }
 
   /**

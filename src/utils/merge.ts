@@ -7,9 +7,17 @@ export function deepMerge<T extends Record<string, unknown>, S extends Record<st
   source: S,
 ): T & S {
   const output: Record<string, unknown> = { ...target };
-  for (const key of Object.keys(source)) {
+
+  for (const key in source) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      continue;
+    }
+
     const sourceValue = source[key];
     const targetValue = output[key];
+
     if (isObject(sourceValue) && isObject(targetValue)) {
       output[key] = deepMerge(
         targetValue as Record<string, unknown>,
@@ -24,6 +32,7 @@ export function deepMerge<T extends Record<string, unknown>, S extends Record<st
         : sourceValue;
     }
   }
+
   return output as T & S;
 }
 
@@ -31,6 +40,10 @@ export function deepMerge<T extends Record<string, unknown>, S extends Record<st
  * @ru Быстрая проверка, является ли переданный элемент чистым объектом (исключая массивы и null).
  * @en Fast check verifying if the provided item is a plain object layout (excluding arrays and null).
  */
-function isObject(item: unknown): boolean {
-  return Object.prototype.toString.call(item) === "[object Object]";
+function isObject(item: unknown): item is Record<string, unknown> {
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    (item.constructor === Object || item.constructor === undefined)
+  );
 }

@@ -1,5 +1,4 @@
 import type { Method, RequestBodyData } from "@hyperttp/types";
-import { CacheManager } from "hcacher";
 
 type NormalizedHeaders = Record<string, string | string[]>;
 
@@ -24,7 +23,7 @@ for (let i = 0; i < singleHeaders.length; i++) {
   SINGLE_VALUE_HEADERS[singleHeaders[i]!] = 1;
 }
 
-const HEADER_KEY_CACHE = new CacheManager<string>({ maxSize: 2048, ttl: 60_000 });
+const HEADER_KEY_CACHE: Record<string, string> = Object.create(null);
 
 const COMMON_HEADERS = [
   "accept",
@@ -59,15 +58,15 @@ const COMMON_HEADERS = [
 
 for (let i = 0; i < COMMON_HEADERS.length; i++) {
   const lower = COMMON_HEADERS[i]!;
-  HEADER_KEY_CACHE.set(lower, lower);
+  HEADER_KEY_CACHE[lower] = lower;
 }
 
 function fastLowercaseKey(key: string): string {
-  const cached = HEADER_KEY_CACHE.get(key);
+  const cached = HEADER_KEY_CACHE[key];
   if (cached !== undefined) return cached;
 
   const lower = key.toLowerCase();
-  HEADER_KEY_CACHE.set(key, lower);
+  HEADER_KEY_CACHE[key] = lower;
   return lower;
 }
 
@@ -170,10 +169,7 @@ function appendRawValue(out: NormalizedHeaders, lower: string, raw: unknown): vo
  * @param out - Optional output object (reused for pooling).
  * @returns Normalized headers object.
  */
-export function normalizeHeaders(
-  headers: unknown,
-  out: NormalizedHeaders = Object.create(null),
-): NormalizedHeaders {
+export function normalizeHeaders(headers: unknown, out: NormalizedHeaders = {}): NormalizedHeaders {
   if (!headers || typeof headers !== "object") return out;
 
   if (!Array.isArray(headers)) {
