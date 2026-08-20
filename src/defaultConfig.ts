@@ -1,19 +1,10 @@
-import type { HttpClientOptions } from "@hyperttp/types";
+import type { HyperClientOptions } from "@hyperttp/types";
 
 /**
- * @ru Конфигурация по умолчанию для HTTP-клиента Hyperttp.
- * @en Default configuration for the Hyperttp HTTP client.
+ * @ru Конфигурация по умолчанию универсального ядра.
+ * @en Default configuration for the universal core.
  */
-export const defaultConfig: HttpClientOptions = {
-  network: {
-    timeout: 30000,
-    maxConcurrent: 128,
-    pipelining: 0,
-    keepAliveTimeout: 5000,
-    followRedirects: true,
-    maxRedirects: 5,
-    rejectUnauthorized: true,
-  },
+export const defaultCoreConfig: HyperClientOptions = {
   retry: {
     maxRetries: 0,
     baseDelay: 100,
@@ -21,4 +12,17 @@ export const defaultConfig: HttpClientOptions = {
     jitter: true,
   },
   verbose: false,
+};
+
+/**
+ * @ru HTTP-конфигурация по умолчанию для HttpSender.
+ * @en Default HTTP configuration for the HttpSender.
+ */
+export const defaultHttpConfig: HyperClientOptions = {
+  retry: {
+    maxRetries: 0,
+    baseDelay: 100,
+    maxDelay: 5000,
+    jitter: true,
+  },
 };

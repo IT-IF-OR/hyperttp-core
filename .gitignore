@@ -5,7 +5,8 @@ pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 package-lock.json
-bun.lock
+
+# Bun lockfile is committed for reproducible development and CI installs.
 
 # PNPM store
 .pnp/

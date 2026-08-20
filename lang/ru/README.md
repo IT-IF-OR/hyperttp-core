@@ -1,290 +1,363 @@
-# @hyperttp/core ⚡
+# @hyperttp/core
 
-> **Высокопроизводительный HTTP-движок для Node.js и Bun.**
+> Протокол-независимое ядро выполнения для клиентских и серверных коммуникаций.
 
-**Русский** | [English](https://github.com/IT-IF-OR/hyperttp-core)
+**Русский** | [English](../../README.md)
 
+[![CI](https://github.com/IT-IF-OR/hyperttp-core/actions/workflows/ci.yml/badge.svg)](https://github.com/IT-IF-OR/hyperttp-core/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@hyperttp/core)](https://www.npmjs.com/package/@hyperttp/core)
 [![npm downloads](https://img.shields.io/npm/dm/@hyperttp/core)](https://www.npmjs.com/package/@hyperttp/core)
 [![bundle size](https://img.shields.io/bundlephobia/minzip/@hyperttp/core)](https://bundlephobia.com/package/@hyperttp/core)
-[![license](https://img.shields.io/npm/l/@hyperttp/core)](./LICENSE)
+[![license](https://img.shields.io/npm/l/@hyperttp/core)](../../LICENSE)
 [![typescript](https://img.shields.io/badge/TypeScript-strict-blue)](https://www.typescriptlang.org/)
 
----
+## Позиционирование
 
-## Что такое @hyperttp/core?
+`@hyperttp/core` — небольшое оркестрационное ядро, а не очередная обёртка над `fetch` и не
+HTTP-фреймворк «со всем из коробки». Оно связывает три независимые точки расширения:
 
-**@hyperttp/core** — это низкоуровневый высокопроизводительный HTTP-движок,
-предназначенный для создания быстрых HTTP-клиентов, SDK и API-обёрток.
+- **Протоколы** определяют семантику коммуникации. Протокол может отправлять через `HyperSender`,
+  принимать через `HyperReceiver` или реализовывать обе роли как `HyperProtocol`.
+- **Транспорты** отвечают за физический I/O. Текущий контракт транспорта выполняет исходящие
+  запросы и может дополнительно слушать входящие запросы.
+- **Плагины** добавляют политики клиентских запросов и сквозное поведение, не расширяя само ядро.
 
-Он предоставляет:
-
-- ⚡ оптимизированный конвейер выполнения запросов;
-- 🔀 абстракцию транспортов с автоматическим выбором под окружение;
-- 🔌 систему плагинов и lifecycle-хуков;
-- 🛡️ безопасную обработку запросов и ответов;
-- 📦 отсутствие runtime-зависимостей.
-
-`@hyperttp/core` является фундаментом **hyperttp**, но также отлично подходит для создания собственных HTTP-клиентов,
-внутренних инструментов, SDK и API-библиотек.
-
-> 💡 Нужен готовый HTTP-клиент «из коробки»?
->
-> Используйте **[`hyperttp`](https://www.npmjs.com/package/hyperttp)** — он уже включает повторы запросов (Retry),
-> кэширование, парсер ответов, Rate Limit и другие плагины.
-
----
-
-## Почему @hyperttp/core?
-
-В отличие от стандартного `fetch()`, HyperCore — это полноценный HTTP-движок, а не просто API для отправки запросов.
-
-| Возможность                 | fetch | @hyperttp/core |
-| --------------------------- | :---: | :------------: |
-| Абстракция транспортов      |  ❌   |       ✅       |
-| Система плагинов            |  ❌   |       ✅       |
-| Lifecycle-хуки              |  ❌   |       ✅       |
-| Пользовательские транспорты |  ❌   |       ✅       |
-| Подходит для SDK            |  ⚠️   |       ✅       |
-| Безопасная очистка Response |  ❌   |       ✅       |
-| Автовыбор транспорта        |  ❌   |       ✅       |
-
----
-
-## Возможности
-
-- ⚡ Минимум аллокаций на горячих путях
-- 🚀 Быстрая ручная сериализация Query String
-- 🔀 Автоматический выбор транспорта
-- 🔌 Расширяемая система плагинов
-- 🧠 Lifecycle-хуки запросов и ответов
-- 🛡️ Защита от Prototype Pollution
-- 🛡️ Проверка заголовков на CRLF-инъекции
-- 🛡️ Безопасная работа с `ArrayBuffer`
-- 📦 Ноль runtime-зависимостей
-- 🌊 Полноценная поддержка потоков (Streams)
-- 🧹 Автоматическое освобождение ресурсов
-- 📈 Оптимизирован для высокой конкуренции запросов
-
----
-
-## Архитектура
+Ядро отвечает за диспетчеризацию, lifecycle, выполнение плагинов и управление ресурсами. REST входит
+в базовую поставку; дополнительные протоколы, оптимизированные транспорты и высокоуровневое поведение
+живут в отдельных пакетах.
 
 ```text
-                  hyperttp
-                      │
-                      ▼
-              @hyperttp/core
-                      │
-      ┌───────────────┴───────────────┐
-      │                               │
-      ▼                               ▼
- Transport Layer              Plugin Pipeline
-      │                               │
-      ├── BunTransport                │
-      ├── UndiciTransport             ├── Retry
-      ├── NodeTransport               ├── Cache
-      ├── BrowserTransport            ├── Parser
-      └── Custom Transport            └── Пользовательские плагины
+Приложение
+    │
+    ├── Плагины: retry, cache, auth, tracing, metrics, logging, policy
+    │
+ HyperCore
+    │
+    ├── Протокол: prepare → send → parse
+    │              receive → handle → respond
+    │
+    └── Транспорт: execute (клиент) / listen (сервер)
+                   Node.js / Bun / Deno / Browser / custom runtime
 ```
 
----
+Эта граница намеренная. Новые повторы клиентских запросов, кэши, способы аутентификации,
+observability и другие политики запросов должны быть плагинами. Новая сетевая семантика должна
+поставляться пакетами протоколов. Новые способы I/O должны поставляться пакетами транспортов.
+
+> Нужен готовый HTTP-клиент с настроенными возможностями? Используйте
+> [`hyperttp`](https://www.npmjs.com/package/hyperttp), который компонует ядро с прикладными плагинами
+> и настройками по умолчанию.
+
+## Свойства ядра
+
+- Оркестрация клиентских и серверных ролей.
+- Протокол-независимый конверт запроса и универсальная форма ответа.
+- Клиентский lifecycle: `prepare → send → parse`.
+- Серверный lifecycle: `receive → handle → respond`.
+- Разрешение транспортов по протоколу и координированное владение ими.
+- Блокирующие и фоновые hooks клиентских плагинов.
+- Выбор транспорта по runtime с browser-safe fetch fallback.
+- Строгие TypeScript-контракты и module augmentation для типизированных namespace протоколов.
+- Отсутствие встроенных runtime-зависимостей.
 
 ## Установка
 
 ```bash
-npm install @hyperttp/core
+npm install @hyperttp/core @hyperttp/types
 ```
 
-Рекомендуемые транспорты:
+Совместимые оптимизированные транспорты устанавливаются отдельно. Убедитесь, что выбранная версия
+транспорта объявляет совместимость с `@hyperttp/types@^0.3.0`: старые версии транспортов рассчитаны
+на контракты типов v1 и не могут быть установлены вместе с core 2.0. Без опционального пакета
+транспорта ядро использует встроенный `FetchTransport`.
 
-```bash
-# Bun
-npm install @hyperttp/transport-bun
-
-# Node.js
-npm install @hyperttp/transport-undici
-```
-
----
-
-## Быстрый старт
+## Быстрый старт клиента
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
 
-const http = new HyperCore({
-  network: {
-    baseURL: "https://api.example.com",
-    headers: {
-      "X-App-Version": "1.0.0",
-    },
-  },
+const core = new HyperCore();
+
+const response = await core.rest.get("https://example.com/users", {
+  query: { page: 1 },
 });
 
-const response = await http.get("/users", {
-  query: {
-    page: 1,
-    limit: 20,
-  },
-});
+console.log(response.status);
+console.log(response.data);
 
-const users = await response.json();
-
-console.log(users);
+await core.destroy();
 ```
 
----
-
-## Обработка ошибок
+Тот же запрос через протокол-независимый API:
 
 ```ts
-import { HyperCore, HttpClientError, TimeoutError } from "@hyperttp/core";
+const response = await core.send({
+  protocol: "rest",
+  input: {
+    method: "GET",
+    url: "https://example.com/users",
+    query: { page: 1 },
+  },
+});
+```
 
-try {
-  const response = await http.get("/users");
+## Быстрый старт сервера
 
-  console.log(await response.json());
-} catch (error) {
-  if (TimeoutError.isTimeoutError(error)) {
-    console.error("Превышено время ожидания запроса.");
+Транспорт также может предоставлять `listen()`. `HyperCore` связывает его с принимающей стороной
+выбранного протокола:
+
+```ts
+import { HyperCore } from "@hyperttp/core";
+
+const core = new HyperCore();
+
+const server = await core.listen({
+  protocol: "rest",
+  host: "127.0.0.1",
+  port: 3000,
+  handler(request) {
+    return {
+      status: 200,
+      body: {
+        method: request.method,
+        path: request.path,
+      },
+    };
+  },
+});
+
+// Закрывает активные серверы и освобождает все транспорты ядра.
+await core.destroy();
+```
+
+Протоколы могут быть только клиентскими, только серверными или предоставлять обе роли. Текущий
+контракт транспорта всегда предоставляет клиентский `execute()` и может дополнительно предоставлять
+серверный `listen()`.
+
+## Протоколы
+
+REST — единственный протокол, реализованный внутри ядра. Внешние модули протоколов загружаются
+лениво:
+
+| Протокол  | Пакет                          | Namespace                    |
+| --------- | ------------------------------ | ---------------------------- |
+| REST      | встроен                        | `core.rest`                  |
+| GraphQL   | `@hyperttp/protocol-graphql`   | `core.graphql`               |
+| gRPC      | `@hyperttp/protocol-grpc`      | `core.grpc`                  |
+| tRPC      | `@hyperttp/protocol-trpc`      | `core.trpc`                  |
+| WebSocket | `@hyperttp/protocol-websocket` | `core.ws` / `core.websocket` |
+| SSE       | `@hyperttp/protocol-sse`       | `core.sse`                   |
+| MQTT      | `@hyperttp/protocol-mqtt`      | `core.mqtt`                  |
+
+Если опциональный пакет протокола не установлен, разрешение завершается понятной подсказкой по
+установке, а не молча выбирает другой протокол.
+
+### Роли протокола
+
+Единый модуль протокола может предоставлять одну или обе роли:
+
+```ts
+const protocol = {
+  protocol: "my-protocol",
+  sender: mySender, // опциональная клиентская роль
+  receiver: myReceiver, // опциональная серверная роль
+};
+
+core.registerProtocol(protocol);
+```
+
+Sender переводит входные данные протокола в транспортный запрос и разбирает транспортный ответ.
+Receiver переводит входящий транспортный запрос в данные протокола и сериализует ответ приложения.
+
+Пакеты протоколов могут расширять типизированные входы и namespace через module augmentation
+`@hyperttp/types`:
+
+```ts
+declare module "@hyperttp/types" {
+  interface ProtocolInputMap {
+    "my-protocol": MyProtocolInput;
   }
 
-  if (HttpClientError.isHttpClientError(error)) {
-    console.error(error.statusCode, error.message);
+  interface HyperProtocols {
+    "my-protocol": MyProtocolMethods;
   }
-
-  throw error;
 }
 ```
-
----
-
-## Потоки (Streaming)
-
-Чтение потокового ответа:
-
-```ts
-const response = await http.stream("https://stream.example.com/audio");
-
-const reader = response.body.getReader();
-
-while (true) {
-  const { done, value } = await reader.read();
-
-  if (done) break;
-
-  console.log(value.length);
-}
-```
-
-Освободить тело ответа без чтения в память:
-
-```ts
-await http.dump("https://api.example.com/ping");
-```
-
----
-
-## Плагины
-
-HyperCore предоставляет lifecycle-хуки для перехвата запросов, ответов и ошибок.
-
-```ts
-http.use({
-  name: "logger",
-  priority: 10,
-
-  onRequest(req) {
-    req.meta.start = performance.now();
-  },
-
-  onResponse(res, req) {
-    const elapsed = performance.now() - (req.meta.start as number);
-
-    console.log(`${req.method} ${req.url} → ${res.status} (${elapsed.toFixed(2)} ms)`);
-  },
-
-  onError(error, req) {
-    console.error(`${req.url}: ${error.message}`);
-  },
-});
-```
-
----
 
 ## Транспорты
 
-HyperCore автоматически определяет среду выполнения, либо можно указать собственный транспорт.
+Транспорт описывает свои клиентские возможности и опциональную серверную возможность:
 
-| Транспорт        | Среда         |
-| ---------------- | ------------- |
-| BunTransport     | Bun           |
-| UndiciTransport  | Node.js       |
-| NodeTransport    | Node.js / Bun |
-| BrowserTransport | Browser       |
-| Custom Transport | Любая         |
+```ts
+interface HyperTransport {
+  execute(request: TransportRequest): Promise<TransportResponse>;
+  listen?(options: TransportListenOptions): Promise<TransportServer>;
+  close?(): Promise<void> | void;
+  destroy?(): Promise<void> | void;
+}
+```
 
-Пример:
+- `execute()` — обязательная клиентская роль.
+- `listen()` — опциональная серверная роль.
+- `protocols` или `supports()` объявляет возможности протоколов.
+- Ядро разрешает и удерживает транспорты по протоколу и закрывает общий экземпляр только после
+  освобождения последнего владельца.
+
+Выбор по runtime:
+
+| Runtime        | Предпочтительный пакет       | Fallback                    |
+| -------------- | ---------------------------- | --------------------------- |
+| Node.js        | `@hyperttp/transport-undici` | встроенный `FetchTransport` |
+| Bun            | `@hyperttp/transport-bun`    | встроенный `FetchTransport` |
+| Deno           | `@hyperttp/transport-deno`   | встроенный `FetchTransport` |
+| Browser / edge | custom transport             | встроенный `FetchTransport` |
+
+Транспорт можно передать явно:
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
 import { UndiciTransport } from "@hyperttp/transport-undici";
 
-const http = new HyperCore({
+const core = new HyperCore({
   customTransport: new UndiciTransport(),
 });
 ```
 
----
+## Плагины
 
-## Производительность
+Плагины — основной механизм расширения поведения клиентских запросов, которое не относится к
+семантике протокола или физическому I/O. Текущие hooks выполняются в клиентском lifecycle `send()`:
 
-HyperCore проектируется для стабильной работы под высокой нагрузкой.
+```ts
+core.use({
+  name: "request-logger",
+  phase: "DATA",
+  onRequest(request) {
+    console.log("request", request.protocol);
+  },
+  onResponse(response) {
+    console.log("response", response.status);
+  },
+  onError(error) {
+    console.error(error);
+  },
+});
+```
 
-Последние стресс-тесты:
+Hooks:
 
-- **200 000 запросов**
-- **1000 одновременных соединений**
-- **120 секунд непрерывной нагрузки**
-- **0 ошибок**
+- `onRequest` может изменить запрос или вернуть ранний ответ.
+- `onResponse` может проверить или заменить ответ.
+- `onError` может восстановить выполнение, вернув ответ.
+- `mode: "background"` отделяет response-side работу от блокирующего пути.
+- `enabled(config)` управляет регистрацией.
+- `setup(context)` инициализирует плагин.
 
-Основные оптимизации:
+Примеры функциональности для плагинов:
 
-- минимальное количество аллокаций;
-- повторное использование объектов;
-- высокопроизводительный ring-buffer семафора;
-- ручная сериализация Query String;
-- быстрая нормализация HTTP-заголовков;
-- отсутствие runtime-зависимостей.
+- retries и circuit breakers;
+- кэширование и дедупликация запросов;
+- аутентификация и подпись запросов;
+- tracing, metrics и структурированное логирование;
+- rate limiting, concurrency control и scheduling;
+- валидация схем и прикладные политики.
 
----
+## Встроенный REST-протокол
 
-## Экосистема
+REST предоставляет клиентскую и серверную роли через `RestProtocol`.
 
-| Пакет                        | Назначение             |
-| ---------------------------- | ---------------------- |
-| `hyperttp`                   | Готовый HTTP-клиент    |
-| `@hyperttp/core`             | HTTP-движок            |
-| `@hyperttp/parser`           | Парсер ответов         |
-| `@hyperttp/cache`            | Кэширование            |
-| `@hyperttp/transport-undici` | Транспорт для Node.js  |
-| `@hyperttp/transport-bun`    | Нативный транспорт Bun |
+```ts
+const getResponse = await core.rest.get("/users", {
+  query: { page: 1, tag: ["a", "b"] },
+  headers: { accept: "application/json" },
+  timeout: 5_000,
+});
 
----
+const postResponse = await core.rest.post("/users", {
+  name: "Ada",
+});
+
+const streamResponse = await core.rest.stream("/events");
+```
+
+REST поддерживает:
+
+- сериализацию query с повторяющимися параметрами массивов;
+- нормализацию заголовков;
+- JSON-сериализацию plain object и array request body;
+- обработку JSON, text и binary response;
+- timeout и пользовательский abort;
+- небуферизованный stream mode;
+- декодирование запросов и сериализацию ответов для серверной роли.
+
+Публичные REST-типы доступны из `@hyperttp/core/rest`.
+
+## Lifecycle
+
+```ts
+const child = core.extend({ verbose: true }); // разделяет transport leases
+const isolated = core.create({}); // независимый lifecycle транспорта
+
+await child.destroy();
+await isolated.destroy();
+await core.destroy();
+```
+
+- `extend()` создаёт связанное ядро и разделяет владение уже разрешёнными транспортами.
+- `create()` создаёт независимое ядро и по умолчанию не наследует `customTransport`.
+- `destroy()` идемпотентен, закрывает отслеживаемые серверы и освобождает транспорты.
+- `destroy(false)` запрашивает принудительное завершение, если транспорт его поддерживает.
+
+## Обработка ошибок
+
+```ts
+import { HyperClientError, TimeoutError } from "@hyperttp/core";
+
+try {
+  await core.rest.get("/slow", { timeout: 1_000 });
+} catch (error) {
+  if (TimeoutError.isTimeoutError(error)) {
+    console.error("Истёк таймаут запроса");
+  } else if (HyperClientError.isHyperClientError(error)) {
+    console.error(error.code, error.message);
+  }
+}
+```
+
+## Границы ядра
+
+Стабильное ядро намеренно ограничено:
+
+1. регистрацией и диспетчеризацией протоколов;
+2. разрешением, разделением и завершением транспортов;
+3. оркестрацией клиентского и серверного lifecycle;
+4. выполнением плагинов;
+5. базовым REST-протоколом и универсальными контрактами ошибок.
+
+Развитие функциональности должно происходить через плагины, пакеты протоколов и пакеты транспортов.
+Маленькая граница делает runtime-поведение предсказуемым и позволяет стабилизировать API ядра
+независимо от окружающей экосистемы.
+
+## Поддержка runtime
+
+- Node.js 20 и новее;
+- актуальный стабильный Bun;
+- актуальный стабильный Deno;
+- современные браузеры и edge runtime с Fetch и Web Streams.
 
 ## Разработка
 
 ```bash
-bun install
-
-bun run lint
-bun run typecheck
-bun run test
-bun run build
+npm install
+npm run format:check
+npm run lint
+npm run typecheck
+npm run test
+npm run build
 ```
 
----
+Обязательный порядок: `lint → typecheck → test → build`. CI дополнительно проверяет browser bundle,
+runtime smoke tests и установку собранного npm tarball.
 
 ## Лицензия
 

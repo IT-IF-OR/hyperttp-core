@@ -1,12 +1,16 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
-import path from "path";
 
 export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    globalSetup: ["./tests/globalSetup.ts"],
     include: ["tests/**/*.test.ts"],
+    server: {
+      deps: {
+        external: [/@hyperttp\/transport-/],
+      },
+    },
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],
@@ -16,7 +20,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
 });
