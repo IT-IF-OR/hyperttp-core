@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
@@ -50,9 +50,10 @@
   },
   "scripts": {
     "build": "tsc && esbuild 'dist/**/*.js' --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
+    "lock:deno": "deno check --node-modules-dir=auto --minimum-dependency-age=0 --lock=deno.lock --frozen=false dist/index.js",
     "dist": "d-dist",
     "deploy": "npm run build && npm run dist",
-    "release:npm": "d-publish",
+    "pub": "d-publish",
     "typecheck": "npm run typecheck:src && npm run typecheck:test",
     "typecheck:src": "tsc --noEmit",
     "typecheck:test": "tsc -p tsconfig.test.json",
@@ -65,15 +66,15 @@
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
-    "@dirold2/dev-tools": "^1.1.2",
+    "@dirold2/dev-tools": "^1.1.3",
     "@hyperttp/types": "^0.3.0",
     "@types/bun": "^1.4.0",
     "@types/deno": "^2.7.0",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.4.0",
     "chalk": "^6.0.0",
     "esbuild": "^0.28.2",
-    "oxfmt": "^0.64.0",
-    "oxlint": "^1.79.0",
+    "oxfmt": "^0.65.0",
+    "oxlint": "^1.80.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"

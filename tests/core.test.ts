@@ -177,6 +177,27 @@ describe("HyperCore (universal core)", () => {
     await expect(core.getReceiverName("ws")).rejects.toThrow(/has no receiver/);
   });
 
+  it("ignores inherited enumerable protocol methods", () => {
+    const inherited = vi.fn();
+    const methods = Object.create({ inherited });
+    methods.own = vi.fn();
+    const core = makeCore();
+
+    core.registerProtocol({
+      protocol: "custom",
+      sender: {
+        protocol: "custom",
+        methods,
+        prepare: (request) => request.input,
+        send: async (prepared) => prepared,
+        parse: (raw) => ({ protocol: "custom", ok: true, status: 200, headers: {}, data: raw }),
+      },
+    });
+
+    expect((core as unknown as Record<string, unknown>).own).toBeTypeOf("function");
+    expect((core as unknown as Record<string, unknown>).inherited).toBeUndefined();
+  });
+
   it("exposes lazy namespaces for other known protocols", async () => {
     const core = new HyperCore({}, makeMockTransport());
     const graphql = (core as unknown as Record<string, unknown>).graphql as {
@@ -202,6 +223,30 @@ describe("HyperCore (universal core)", () => {
 
     await core.send({ protocol: "rest", input: { method: "GET", url: "/users" } });
     expect(calls).toEqual(["onRequest", "onResponse"]);
+  });
+
+  it("applies plugins registered during a request only to later requests", async () => {
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const late = vi.fn();
+    const core = makeCore();
+    core.use({
+      name: "pause",
+      onRequest: async () => paused,
+    });
+
+    const first = core.send({ protocol: "rest", input: { method: "GET", url: "/first" } });
+    await Promise.resolve();
+    core.use({ name: "late", onRequest: late });
+    resume();
+    await first;
+
+    expect(late).not.toHaveBeenCalled();
+
+    await core.send({ protocol: "rest", input: { method: "GET", url: "/second" } });
+    expect(late).toHaveBeenCalledOnce();
   });
 
   it("short-circuits the request when onRequest returns a response", async () => {
@@ -442,6 +487,34 @@ describe("HyperCore (universal core)", () => {
     for (const id of ids) {
       expect(id).toMatch(/^[0-9a-z]+-[0-9a-z]+$/);
     }
+  });
+
+  it("retries transport resolution after a transient capability failure", async () => {
+    let supported = false;
+    const transport: HyperTransport = {
+      ...makeMockTransport(),
+      supports: () => supported,
+    };
+    const core = new HyperCore({ customTransport: transport });
+    core.registerSender({
+      protocol: "custom",
+      prepare: (request) => request.input,
+      send: async (prepared) => prepared,
+      parse: (raw) => ({ protocol: "custom", ok: true, status: 200, headers: {}, data: raw }),
+    });
+
+    await expect(core.send({ protocol: "custom", input: { url: "/retry" } })).rejects.toThrow(
+      /does not support protocol/,
+    );
+
+    supported = true;
+    await expect(
+      core.send({ protocol: "custom", input: { url: "/retry" } }),
+    ).resolves.toMatchObject({
+      protocol: "custom",
+      status: 200,
+    });
+    await core.destroy();
   });
 
   it("retains a lazily resolved transport exactly once under concurrent startup", async () => {

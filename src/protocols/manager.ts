@@ -141,6 +141,12 @@ export async function resolveReceiver<P extends SenderProtocol>(
   return resolved.receiver;
 }
 
+/**
+ * @ru Очищает кэш загруженных модулей протоколов. Не выгружает уже импортированные
+ * JavaScript-модули из runtime.
+ * @en Clears the loaded protocol-module cache. It does not unload JavaScript
+ * modules already imported by the runtime.
+ */
 export function resetCachedProtocols(): void {
   protocolCache.clear();
 }

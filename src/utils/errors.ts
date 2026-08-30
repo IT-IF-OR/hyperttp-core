@@ -4,8 +4,14 @@
  */
 export class HyperClientError extends Error {
   /**
-   * @ru Создает новый экземпляр HttpClientError.
-   * @en Creates a new HttpClientError instance.
+   * @ru Создает ошибку Hyperttp с дополнительным сетевым контекстом.
+   * @en Creates a Hyperttp error with optional network context.
+   * @param message - Человекочитаемое описание ошибки. @en Human-readable error description.
+   * @param code - Машиночитаемый код ошибки. @en Machine-readable error code.
+   * @param statusCode - Связанный HTTP-статус, если есть. @en Associated HTTP status, when available.
+   * @param originalError - Исходная ошибка как `cause`. @en Original error exposed as `cause`.
+   * @param url - URL, связанный с ошибкой. @en URL associated with the error.
+   * @param method - HTTP-метод, связанный с ошибкой. @en HTTP method associated with the error.
    */
   constructor(
     message: string,
@@ -38,8 +44,10 @@ export class HyperClientError extends Error {
  */
 export class TimeoutError extends HyperClientError {
   /**
-   * @ru Создает новый экземпляр TimeoutError.
-   * @en Creates a new TimeoutError instance.
+   * @ru Создает ошибку таймаута для указанного URL.
+   * @en Creates a timeout error for the given URL.
+   * @param url - URL запроса с истекшим таймаутом. @en URL of the timed-out request.
+   * @param timeout - Лимит времени в миллисекундах. @en Time limit in milliseconds.
    */
   constructor(url: string, timeout: number) {
     super(`Timeout after ${timeout}ms`, "TIMEOUT", 408, undefined, url);

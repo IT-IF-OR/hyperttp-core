@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.0.1] — 2026-08-30
+
+### Fixed
+
+- Failed lazy transport resolution no longer leaves a rejected promise cached per protocol, so a later request can retry after a transient transport capability or initialization failure.
+- Plugin registration now uses copy-on-write ordering and each request captures one plugin snapshot, preventing a concurrently registered plugin from being skipped, repeated, or applied mid-flight.
+- Protocol method registration now ignores inherited enumerable properties and exposes only methods owned by the sender method surface.
+
+### Security
+
+- Pinned every GitHub Actions dependency in CI to a verified full commit SHA, preventing mutable-tag supply-chain substitution.
+
+### Changed
+
+- Clarified that graceful shutdown delegates in-flight server request draining to the transport server's `close()` implementation.
+- Expanded public API documentation with bilingual `@ru`/`@en` JSDoc, parameter descriptions, return contracts and usage examples.
+
 ## [2.0.0] — 2026-08-21
 
 **Major rewrite and product boundary reset.** The v1 HTTP-specific pipeline is replaced by a small,

@@ -44,3 +44,6 @@ coverage/
 
 # Linux
 *~
+
+# Serena
+.serena

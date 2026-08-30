@@ -16,6 +16,12 @@ export interface FetchTransportOptions {
    * @en Custom list of supported protocols.
    */
   protocols?: SenderProtocol[];
+  /**
+   * @ru Максимальный размер входящего серверного тела в байтах. Превышение
+   * возвращает HTTP 413 до передачи тела обработчику.
+   * @en Maximum incoming server request body size in bytes. Exceeding it returns
+   * HTTP 413 before the body reaches the handler.
+   */
   maxBodyBytes?: number;
 }
 
@@ -43,6 +49,11 @@ export class FetchTransport implements HyperTransport {
   public readonly protocols: readonly SenderProtocol[];
   private readonly maxBodyBytes: number;
 
+  /**
+   * @ru Создаёт fallback-транспорт на базе глобального `fetch`.
+   * @en Creates a fallback transport based on global `fetch`.
+   * @param options - Поддерживаемые протоколы и серверный лимит тела. @en Supported protocols and server body limit.
+   */
   constructor(options: FetchTransportOptions = {}) {
     this.protocols = Object.freeze(options.protocols ?? ["rest"]);
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;

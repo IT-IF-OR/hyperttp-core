@@ -227,7 +227,7 @@ jobs:
           mkdir hyperttp-consumer
           cd hyperttp-consumer
           npm init --yes
-          npm install ../hyperttp-core-2.0.0.tgz typescript@^7
+          npm install ../hyperttp-core-*.tgz typescript@^7
 
       - name: Import public entry points and execute a request
         working-directory: /tmp/hyperttp-consumer

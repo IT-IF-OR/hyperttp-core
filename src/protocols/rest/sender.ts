@@ -24,7 +24,14 @@ type RestTransportResponse = TransportResponse & {
   [STREAM_HINT]?: boolean;
 };
 
+/**
+ * @ru Опции REST-сендера. Транспорт выбирается ядром; поле `transport` сохранено
+ * для совместимости с пользовательскими конфигурациями.
+ * @en REST sender options. The core selects the transport; `transport` remains
+ * for compatibility with custom configurations.
+ */
 export interface RestSenderOptions {
+  /** @ru Пользовательский транспорт. @en Custom transport. */
   transport?: HyperTransport;
   [key: string]: unknown;
 }
@@ -96,6 +103,11 @@ export class RestSender implements HyperSender<
   readonly protocol = "rest";
   protected readonly options?: RestSenderOptions;
 
+  /**
+   * @ru Создаёт REST-сендер с необязательными пользовательскими настройками.
+   * @en Creates a REST sender with optional custom settings.
+   * @param options - Настройки сендера. @en Sender settings.
+   */
   constructor(options?: RestSenderOptions) {
     this.options = options;
   }

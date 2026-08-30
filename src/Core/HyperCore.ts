@@ -194,7 +194,7 @@ export class HyperCore implements IHyperCore {
 
   private readonly registry = new DefaultProtocolRegistry();
   private readonly pluginCtx: PluginContext;
-  private readonly plugins: HyperPlugin[] = [];
+  private plugins: HyperPlugin[] = [];
   private readonly servers = new Set<TransportServer>();
   private readonly protocolNamespaces = new Set<string>();
   private readonly generatedFlatMethods = new Set<string>();
@@ -422,6 +422,8 @@ export class HyperCore implements IHyperCore {
       const namespace: Record<string, unknown> = Object.create(null);
 
       for (const name in methods) {
+        if (!Object.hasOwn(methods, name)) continue;
+
         const method = methods[name] as ((...args: unknown[]) => unknown) | undefined;
         if (typeof method !== "function") continue;
 
@@ -547,9 +549,10 @@ export class HyperCore implements IHyperCore {
     req: SendRequest<TInput, P>,
   ): Promise<UniversalResponse<TOutput>> {
     const ctx = createRequestContext(req as SendRequest<unknown, string>);
+    const plugins = this.plugins;
     let currentReq = req as SendRequest<any, any>;
 
-    if (this.plugins.length === 0) {
+    if (plugins.length === 0) {
       const sender = this.registry.get(req.protocol)?.sender;
       if (sender) {
         return this.runSender<TInput, TOutput>(sender, req as SendRequest<TInput, string>, ctx);
@@ -559,8 +562,8 @@ export class HyperCore implements IHyperCore {
     try {
       let response: UniversalResponse<TOutput> | undefined;
 
-      for (let i = 0; i < this.plugins.length; i++) {
-        const plugin = this.plugins[i]!;
+      for (let i = 0; i < plugins.length; i++) {
+        const plugin = plugins[i]!;
         if (typeof plugin.onRequest !== "function") continue;
 
         const result = await plugin.onRequest(currentReq, this.pluginCtx, ctx);
@@ -580,10 +583,10 @@ export class HyperCore implements IHyperCore {
         response = await this.runSender<unknown, TOutput>(sender, currentReq, ctx);
       }
 
-      return await this.runResponseHooks(response, currentReq, ctx);
+      return await this.runResponseHooks(response, currentReq, ctx, plugins);
     } catch (err) {
-      for (let i = 0; i < this.plugins.length; i++) {
-        const plugin = this.plugins[i]!;
+      for (let i = 0; i < plugins.length; i++) {
+        const plugin = plugins[i]!;
         if (typeof plugin.onError !== "function") continue;
 
         const recovered = await plugin.onError(err, currentReq, this.pluginCtx, ctx);
@@ -615,11 +618,12 @@ export class HyperCore implements IHyperCore {
     initialResponse: UniversalResponse<TOutput>,
     req: SendRequest<any, any>,
     ctx: RequestContext,
+    plugins: readonly HyperPlugin[],
   ): Promise<UniversalResponse<TOutput>> {
     let response = initialResponse;
 
-    for (let i = 0; i < this.plugins.length; i++) {
-      const plugin = this.plugins[i]!;
+    for (let i = 0; i < plugins.length; i++) {
+      const plugin = plugins[i]!;
       if (typeof plugin.onResponse !== "function") continue;
 
       if (plugin.mode === "background") {
@@ -670,7 +674,15 @@ export class HyperCore implements IHyperCore {
     let pending = this.transportPromises.get(protocol);
     if (!pending) {
       pending = this.resolveAndRetainTransport(protocol);
-      this.transportPromises.set(protocol, pending);
+      let tracked!: Promise<HyperTransport>;
+      tracked = pending.catch((err: unknown) => {
+        if (this.transportPromises.get(protocol) === tracked) {
+          this.transportPromises.delete(protocol);
+        }
+        throw err;
+      });
+      this.transportPromises.set(protocol, tracked);
+      pending = tracked;
     }
 
     const transport = await pending;
@@ -811,8 +823,7 @@ export class HyperCore implements IHyperCore {
     if (!enabled) return this;
 
     plugin.setup?.(this.pluginCtx);
-    this.plugins.push(plugin);
-    this.plugins.sort(
+    this.plugins = [...this.plugins, plugin].sort(
       (a, b) => (PLUGIN_PHASE_ORDER[a.phase ?? ""] ?? 0) - (PLUGIN_PHASE_ORDER[b.phase ?? ""] ?? 0),
     );
     return this;
@@ -850,10 +861,12 @@ export class HyperCore implements IHyperCore {
 
   /**
    * @ru Завершает работу ядра и освобождает ресурсы: закрывает активные серверы,
-   * затем освобождает удержание транспорта.
+   * затем освобождает удержание транспорта. Graceful-дренирование активных запросов
+   * определяется реализацией `TransportServer.close()`.
    * @en Shuts down the core and releases resources: closes active servers, then
-   * releases the transport hold.
-   * @param graceful - If true, waits for active requests to complete.
+   * releases the transport hold. Graceful draining of in-flight requests is defined
+   * by the `TransportServer.close()` implementation.
+   * @param graceful - If true, prefers `transport.close()`; otherwise prefers `transport.destroy()`.
    * @returns Promise that resolves when shutdown is complete.
    */
   public destroy(graceful = true): Promise<void> {

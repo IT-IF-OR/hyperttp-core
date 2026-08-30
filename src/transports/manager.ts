@@ -149,13 +149,20 @@ export async function resolveTransport(
 }
 
 /**
- * @ru Синхронно возвращает транспорт из кэша без обёртывания в Promise.
- * @en Synchronously returns a cached transport without Promise overhead.
+ * @ru Синхронно возвращает транспорт из кэша без создания Promise.
+ * @en Synchronously returns a cached transport without creating a Promise.
+ * @param protocol - Протокол, для которого запрашивается транспорт. @en Protocol whose transport is requested.
+ * @returns Кэшированный транспорт или `undefined`. @en Cached transport or `undefined`.
  */
 export function getCachedTransport(protocol: SenderProtocol = "rest"): HyperTransport | undefined {
   return transportCache.get(protocol);
 }
 
+/**
+ * @ru Удаляет все записи кэша, ссылающиеся на указанный транспорт.
+ * @en Removes every cache entry that references the given transport.
+ * @param transport - Экземпляр транспорта для удаления из кэша. @en Transport instance to evict from the cache.
+ */
 export function evictCachedTransport(transport: HyperTransport): void {
   for (const [protocol, cached] of transportCache) {
     if (cached === transport) {
@@ -164,6 +171,12 @@ export function evictCachedTransport(transport: HyperTransport): void {
   }
 }
 
+/**
+ * @ru Очищает кэш транспортов и ожидающих их разрешений. Не закрывает уже
+ * созданные экземпляры транспорта.
+ * @en Clears cached transports and pending resolutions. It does not close
+ * already-created transport instances.
+ */
 export function resetCachedTransport(): void {
   transportCache.clear();
   transportResolutions.clear();

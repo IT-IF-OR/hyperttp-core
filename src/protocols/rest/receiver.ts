@@ -135,6 +135,11 @@ export class RestReceiver implements HyperReceiver<
   readonly protocol = "rest";
   protected readonly handler?: RestServerHandler;
 
+  /**
+   * @ru Создаёт REST-ресивер с необязательным application handler.
+   * @en Creates a REST receiver with an optional application handler.
+   * @param options - Настройки ресивера и его обработчик. @en Receiver settings and its handler.
+   */
   constructor(options: { handler?: RestServerHandler } = {}) {
     this.handler = options.handler;
   }
