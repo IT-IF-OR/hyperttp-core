@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/utils/modules.ts"],
+  "sourcesContent": ["export function isModuleNotFoundError(err: unknown): boolean {\n  if (!err || typeof err !== \"object\") return false;\n  const e = err as Record<string, unknown>;\n  if (e.code === \"ERR_MODULE_NOT_FOUND\" || e.code === \"MODULE_NOT_FOUND\") return true;\n\n  const message = err instanceof Error ? err.message : String(e.message ?? \"\");\n  return (\n    message.includes(\"Cannot find module\") ||\n    message.includes(\"Failed to resolve\") ||\n    message.includes(\"Failed to load\")\n  );\n}\n\nexport async function dynamicImport(pkg: string): Promise<Record<string, unknown>> {\n  /* @vite-ignore */\n  return import(/* webpackIgnore: true */ pkg);\n}\n"],
+  "mappings": "aAAM,gBAAU,sBAAsBA,EAAY,CAChD,GAAI,CAACA,GAAO,OAAOA,GAAQ,SAAU,MAAO,GAC5C,MAAMC,EAAID,EACV,GAAIC,EAAE,OAAS,wBAA0BA,EAAE,OAAS,mBAAoB,MAAO,GAE/E,MAAMC,EAAUF,aAAe,MAAQA,EAAI,QAAU,OAAOC,EAAE,SAAW,EAAE,EAC3E,OACEC,EAAQ,SAAS,oBAAoB,GACrCA,EAAQ,SAAS,mBAAmB,GACpCA,EAAQ,SAAS,gBAAgB,CAErC,CAEA,sBAAsB,cAAcC,EAAW,CAE7C,OAAO,OAAiCA,EAC1C",
+  "names": ["err", "e", "message", "pkg"]
+}

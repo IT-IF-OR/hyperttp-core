@@ -1,0 +1,2 @@
+"use strict";export function createTimeoutSignal(e,t,n,o){const r=new AbortController;let l=!1;const c=()=>{l||(l=!0,e&&e.removeEventListener("abort",i),clearTimeout(a))},a=setTimeout(()=>{r.signal.isTimeout=!0;const u=typeof o=="function"?o():o;r.abort(u??new DOMException("Timeout","TimeoutError")),c()},t),i=()=>{r.abort(e?.reason),c()};return e&&(e.aborted?i():e.addEventListener("abort",i)),n.cleanupSignal=c,r.signal}export function applyTimeout(e,t,n,o){return t==null||t<=0?e:createTimeoutSignal(e,t,n,o)}
+//# sourceMappingURL=abort.js.map

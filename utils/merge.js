@@ -1,0 +1,2 @@
+"use strict";export function deepMerge(n,c){const e={...n};for(const t in c){if(!Object.prototype.hasOwnProperty.call(c,t)||t==="__proto__"||t==="constructor"||t==="prototype")continue;const o=c[t],u=e[t];if(r(o)&&r(u)){e[t]=deepMerge(u,o);continue}o!==void 0&&(e[t]=r(o)?deepMerge({},o):o)}return e}function r(n){return typeof n=="object"&&n!==null&&(n.constructor===Object||n.constructor===void 0)}
+//# sourceMappingURL=merge.js.map

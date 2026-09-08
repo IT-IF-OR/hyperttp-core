@@ -1,0 +1,2 @@
+"use strict";export function isModuleNotFoundError(e){if(!e||typeof e!="object")return!1;const o=e;if(o.code==="ERR_MODULE_NOT_FOUND"||o.code==="MODULE_NOT_FOUND")return!0;const n=e instanceof Error?e.message:String(o.message??"");return n.includes("Cannot find module")||n.includes("Failed to resolve")||n.includes("Failed to load")}export async function dynamicImport(e){return import(e)}
+//# sourceMappingURL=modules.js.map

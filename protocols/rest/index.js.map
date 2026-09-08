@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/protocols/rest/index.ts"],
+  "sourcesContent": ["import type { HyperProtocol } from \"@hyperttp/types\";\nimport type { RestInput, RestServerInput, RestServerResponse } from \"./type.js\";\nimport { RestReceiver } from \"./receiver.js\";\nimport { RestSender } from \"./sender.js\";\n\n/**\n * @ru Единый REST-модуль протокола, объединяющий клиентский сендер и серверный ресивер.\n * @en Unified REST protocol module combining a client sender and a server receiver.\n */\nexport const RestProtocol: HyperProtocol<\n  RestInput,\n  unknown,\n  RestServerInput,\n  RestServerResponse,\n  \"rest\"\n> = {\n  protocol: \"rest\",\n  name: \"RestProtocol\",\n  sender: new RestSender(),\n  receiver: new RestReceiver(),\n};\n\nexport { RestReceiver } from \"./receiver.js\";\nexport { RestSender } from \"./sender.js\";\n"],
+  "mappings": "aAEA,OAAS,gBAAAA,MAAoB,gBAC7B,OAAS,cAAAC,MAAkB,cAMpB,aAAM,aAMT,CACF,SAAU,OACV,KAAM,eACN,OAAQ,IAAIA,EACZ,SAAU,IAAID,GAGhB,OAAS,iBAAoB,gBAC7B,OAAS,eAAkB",
+  "names": ["RestReceiver", "RestSender"]
+}

@@ -31,53 +31,19 @@
     "type": "git",
     "url": "git+https://github.com/IT-IF-OR/hyperttp-core.git"
   },
-  "files": [
-    "dist"
-  ],
   "type": "module",
   "sideEffects": false,
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./index.js",
+  "types": "./index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./index.d.ts",
+      "import": "./index.js"
     },
     "./rest": {
-      "types": "./dist/rest.d.ts",
-      "import": "./dist/rest.js"
+      "types": "./rest.d.ts",
+      "import": "./rest.js"
     }
-  },
-  "scripts": {
-    "build": "tsc && esbuild 'dist/**/*.js' --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
-    "lock:bun": "bun install --lockfile-only",
-    "lock:deno": "deno check --node-modules-dir=auto --minimum-dependency-age=0 --lock=deno.lock --frozen=false dist/index.js",
-    "dist": "npm run lock:bun && npm run lock:deno && d-dist",
-    "deploy": "npm run build && npm run dist",
-    "pub": "d-publish",
-    "typecheck": "npm run typecheck:src && npm run typecheck:test",
-    "typecheck:src": "tsc --noEmit",
-    "typecheck:test": "tsc -p tsconfig.test.json",
-    "lint": "oxlint src tests vitest.config.ts",
-    "lint:fix": "oxlint src tests vitest.config.ts --fix",
-    "format": "oxfmt src tests vitest.config.ts",
-    "format:check": "oxfmt src tests vitest.config.ts --check",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "dev": "tsx src/index.ts",
-    "prepublishOnly": "npm run build"
-  },
-  "devDependencies": {
-    "@dirold2/dev-tools": "^1.1.3",
-    "@hyperttp/types": "^0.4.2",
-    "@types/node": "^26.5.0",
-    "@vitest/coverage-v8": "^5.0.0",
-    "esbuild": "^0.28.2",
-    "oxfmt": "^0.67.0",
-    "oxlint": "^1.82.0",
-    "tsx": "^4.23.13",
-    "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
   },
   "peerDependencies": {
     "@hyperttp/types": "^0.4.2"
@@ -85,5 +51,6 @@
   "engines": {
     "node": ">=20"
   },
-  "packageManager": "bun@1.4.0"
+  "packageManager": "bun@1.4.0",
+  "private": false
 }
