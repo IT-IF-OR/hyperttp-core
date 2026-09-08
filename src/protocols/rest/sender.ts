@@ -11,40 +11,18 @@ import type {
 import type { RestInput, RestRequestOptions, HttpMethod } from "./type.js";
 import { TimeoutError } from "../../utils/errors.js";
 import { applyTimeout } from "../../utils/abort.js";
+import { DEFAULT_STATUS_TEXTS, getHeaderValue } from "./utils.js";
 
 const STREAM_HINT = "rest:stream";
 const TEXT_DECODER = new TextDecoder();
 const REQUEST_CLEANUPS = new WeakMap<TransportRequest, () => void>();
 
 type RestTransportRequest = TransportRequest & {
-  stream?: boolean;
+  stealth?: boolean;
 };
 
 type RestTransportResponse = TransportResponse & {
   [STREAM_HINT]?: boolean;
-};
-
-/**
- * @ru Опции REST-сендера. Транспорт выбирается ядром; поле `transport` сохранено
- * для совместимости с пользовательскими конфигурациями.
- * @en REST sender options. The core selects the transport; `transport` remains
- * for compatibility with custom configurations.
- */
-export interface RestSenderOptions {
-  /** @ru Пользовательский транспорт. @en Custom transport. */
-  transport?: HyperTransport;
-  [key: string]: unknown;
-}
-
-const defaultStatusTexts: Record<number, string> = {
-  200: "OK",
-  201: "Created",
-  204: "No Content",
-  400: "Bad Request",
-  401: "Unauthorized",
-  403: "Forbidden",
-  404: "Not Found",
-  500: "Internal Server Error",
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -101,16 +79,6 @@ export class RestSender implements HyperSender<
   TransportResponse
 > {
   readonly protocol = "rest";
-  protected readonly options?: RestSenderOptions;
-
-  /**
-   * @ru Создаёт REST-сендер с необязательными пользовательскими настройками.
-   * @en Creates a REST sender with optional custom settings.
-   * @param options - Настройки сендера. @en Sender settings.
-   */
-  constructor(options?: RestSenderOptions) {
-    this.options = options;
-  }
 
   readonly methods: Readonly<Record<string, (...args: any[]) => any>> = {
     get: (core: IHyperCore, url: string, options?: RestRequestOptions, signal?: AbortSignal) =>
@@ -276,7 +244,7 @@ export class RestSender implements HyperSender<
       signal,
       protocol: this.protocol,
       stream: input.stream,
-      stealth: (input as any).stealth,
+      stealth: input.stealth,
       followRedirects: input.followRedirects,
       maxRedirects: input.maxRedirects,
     } as RestTransportRequest;
@@ -313,7 +281,7 @@ export class RestSender implements HyperSender<
     let parsedData: unknown = raw.body;
 
     if (!(raw as RestTransportResponse)[STREAM_HINT] && raw.body instanceof Uint8Array) {
-      const contentType = this.getHeaderValue(raw.headers, "content-type") ?? "";
+      const contentType = getHeaderValue(raw.headers, "content-type") ?? "";
       const text = TEXT_DECODER.decode(raw.body);
 
       if (contentType.includes("application/json")) {
@@ -331,7 +299,7 @@ export class RestSender implements HyperSender<
       protocol: this.protocol,
       ok,
       status: raw.status,
-      statusText: raw.statusText || defaultStatusTexts[raw.status] || "",
+      statusText: raw.statusText || DEFAULT_STATUS_TEXTS[raw.status] || "",
       headers: raw.headers,
       url: raw.url,
       data: parsedData,
@@ -384,21 +352,5 @@ export class RestSender implements HyperSender<
     const separator = baseUrl.includes("?") ? "&" : "?";
 
     return `${baseUrl}${separator}${queryString}`;
-  }
-
-  private getHeaderValue(
-    headers: Record<string, string | string[]>,
-    name: string,
-  ): string | undefined {
-    const target = name.toLowerCase();
-    const direct = headers[target] ?? headers[name];
-    if (direct !== undefined) return Array.isArray(direct) ? direct[0] : direct;
-
-    for (const key in headers) {
-      if (key.toLowerCase() !== target) continue;
-      const value = headers[key];
-      return Array.isArray(value) ? value[0] : value;
-    }
-    return undefined;
   }
 }

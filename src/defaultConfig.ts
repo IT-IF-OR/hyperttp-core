@@ -13,16 +13,3 @@ export const defaultCoreConfig: HyperClientOptions = {
   },
   verbose: false,
 };
-
-/**
- * @ru HTTP-конфигурация по умолчанию для HttpSender.
- * @en Default HTTP configuration for the HttpSender.
- */
-export const defaultHttpConfig: HyperClientOptions = {
-  retry: {
-    maxRetries: 0,
-    baseDelay: 100,
-    maxDelay: 5000,
-    jitter: true,
-  },
-};

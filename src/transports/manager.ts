@@ -1,5 +1,6 @@
-import type { HyperTransport, SenderProtocol } from "@hyperttp/types";
+import type { HyperTransport, LogLevel, SenderProtocol } from "@hyperttp/types";
 import { FetchTransport, type FetchTransportOptions } from "./fetch.js";
+import { dynamicImport, isModuleNotFoundError } from "../utils/modules.js";
 
 declare const Bun: unknown;
 declare const Deno: unknown;
@@ -12,6 +13,8 @@ export type Runtime = "bun" | "node" | "deno" | "browser";
  */
 export interface ResolveTransportOptions {
   customTransport?: HyperTransport;
+  logger?: (level: LogLevel, message: string, meta?: unknown) => void;
+  verbose?: boolean;
   [key: string]: unknown;
 }
 
@@ -26,39 +29,18 @@ type TransportDef = {
   readonly runtime: readonly Runtime[];
   readonly pkg: string;
   readonly export: string;
-  readonly priority: number;
 };
 
 const TRANSPORT_DEFS: readonly TransportDef[] = [
-  { runtime: ["bun"], pkg: "@hyperttp/transport-bun", export: "BunTransport", priority: 100 },
-  { runtime: ["node"], pkg: "@hyperttp/transport-undici", export: "UndiciTransport", priority: 90 },
-  { runtime: ["deno"], pkg: "@hyperttp/transport-deno", export: "DenoTransport", priority: 85 },
+  { runtime: ["bun"], pkg: "@hyperttp/transport-bun", export: "BunTransport" },
+  { runtime: ["node"], pkg: "@hyperttp/transport-undici", export: "UndiciTransport" },
+  { runtime: ["deno"], pkg: "@hyperttp/transport-deno", export: "DenoTransport" },
 ];
 
-const CANDIDATES: readonly TransportDef[] = TRANSPORT_DEFS.filter((t) =>
-  t.runtime.includes(CURRENT_RUNTIME),
-).sort((a, b) => b.priority - a.priority);
+const CANDIDATES = TRANSPORT_DEFS.filter((t) => t.runtime.includes(CURRENT_RUNTIME));
 
 const transportCache = new Map<string, HyperTransport>();
 const transportResolutions = new Map<string, Promise<HyperTransport>>();
-
-function isModuleNotFoundError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as Record<string, unknown>;
-  if (e.code === "ERR_MODULE_NOT_FOUND" || e.code === "MODULE_NOT_FOUND") return true;
-
-  const msg = err instanceof Error ? err.message : String(e.message ?? "");
-  return (
-    msg.includes("Cannot find module") ||
-    msg.includes("Failed to resolve") ||
-    msg.includes("Failed to load")
-  );
-}
-
-async function dynamicImport(pkg: string): Promise<Record<string, unknown>> {
-  /* @vite-ignore */
-  return import(/* webpackIgnore: true */ pkg);
-}
 
 function supportsProtocol(transport: HyperTransport, protocol: SenderProtocol): boolean {
   return typeof transport.supports === "function"
@@ -99,9 +81,12 @@ async function createTransport(
     }
   }
 
-  console.warn(
-    `[HyperCore] Fast transport (e.g. @hyperttp/transport-undici) unavailable for runtime "${CURRENT_RUNTIME}". Falling back to slow FetchTransport.`,
-  );
+  const message = `[HyperCore] Fast transport (e.g. @hyperttp/transport-undici) unavailable for runtime "${CURRENT_RUNTIME}". Falling back to slow FetchTransport.`;
+  if (config?.logger) {
+    config.logger("warn", message);
+  } else if (config?.verbose) {
+    console.warn(message);
+  }
 
   const fetchTransport = new FetchTransport(config as unknown as FetchTransportOptions);
   if (supportsProtocol(fetchTransport, protocol)) return fetchTransport;

@@ -1,5 +1,32 @@
 # Changelog
 
+## [2.0.2] — 2026-09-09
+
+### Added
+
+- Added REST module augmentation for `ProtocolServerRequestMap` and
+  `ProtocolServerResponseMap`, enabling typed `core.listen()` handlers.
+- Added asynchronous `HyperCore.create()` factory for loading plugins from module paths.
+- Added `logger` integration for transport fallback messages, background plugin errors
+  and Node.js server errors.
+- Added `FetchTransportOptions.onError` for observing incoming server request failures.
+- Added coverage measurement through `npm run test:coverage`.
+
+### Fixed
+
+- Fixed `RestProtocol` generic typing for compatibility with
+  `@hyperttp/types@0.4.2` contracts.
+- Fixed REST header input typing to support `Headers`, header records and tuple arrays.
+- Fixed transport diagnostics to use the configured logger when available.
+- Pinned GitHub Actions dependencies to immutable commit SHAs.
+
+### Changed
+
+- REST transport requests now use the universal `stream`, `followRedirects` and
+  `maxRedirects` fields from `@hyperttp/types`.
+- Plugin module paths are resolved through the asynchronous `HyperCore.create()` factory;
+  the synchronous constructor remains synchronous and rejects unresolved module paths.
+
 ## [2.0.1] — 2026-08-30
 
 ### Fixed

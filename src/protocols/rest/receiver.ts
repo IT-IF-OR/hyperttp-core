@@ -6,6 +6,7 @@ import type {
 } from "@hyperttp/types";
 import type { RestServerHandler, RestServerInput, RestServerResponse } from "./type.js";
 import { HyperClientError } from "../../utils/errors.js";
+import { DEFAULT_STATUS_TEXTS, getHeaderValue } from "./utils.js";
 
 const JSON_TYPE = "application/json";
 const TEXT_DECODER = new TextDecoder();
@@ -33,17 +34,6 @@ function encodeUtf8(str: string): Uint8Array {
   return TEXT_ENCODER.encode(str);
 }
 
-const defaultStatusTexts: Record<number, string> = {
-  200: "OK",
-  201: "Created",
-  204: "No Content",
-  400: "Bad Request",
-  401: "Unauthorized",
-  403: "Forbidden",
-  404: "Not Found",
-  500: "Internal Server Error",
-};
-
 /**
  * @ru Разбирает query-строку URL в словарь (поддерживает повторные ключи как массивы).
  * @en Parses a URL query string into a dictionary (supports repeated keys as arrays).
@@ -64,28 +54,6 @@ function parseQuery(queryString: string): Record<string, string | string[]> {
   }
 
   return out;
-}
-
-/**
- * @ru Регистронезависимое получение значения заголовка.
- * @en Case-insensitive header value lookup.
- */
-function getHeaderValue(
-  headers: Readonly<Record<string, string | string[]>>,
-  name: string,
-): string | undefined {
-  const direct = headers[name] ?? headers[name.toLowerCase()];
-  if (direct !== undefined) {
-    return Array.isArray(direct) ? direct[0] : direct;
-  }
-  const targetKey = name.toLowerCase();
-  for (const key in headers) {
-    if (key.toLowerCase() === targetKey) {
-      const val = headers[key];
-      return Array.isArray(val) ? val[0] : val;
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -202,7 +170,7 @@ export class RestReceiver implements HyperReceiver<
 
     return {
       status,
-      statusText: defaultStatusTexts[status] ?? "",
+      statusText: DEFAULT_STATUS_TEXTS[status] ?? "",
       headers,
       body: body == null ? undefined : body instanceof Uint8Array ? body : encodeUtf8(String(body)),
     };

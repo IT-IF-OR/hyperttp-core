@@ -1,5 +1,6 @@
 export type {
   HttpMethod,
+  RestHeaders,
   RestInput,
   RestRequestOptions,
   RestClientMethods,

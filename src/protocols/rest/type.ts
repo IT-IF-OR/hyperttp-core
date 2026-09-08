@@ -1,4 +1,4 @@
-import type { HyperSender, ServerRequestContext, UniversalResponse } from "@hyperttp/types";
+import type { ServerRequestContext, UniversalResponse } from "@hyperttp/types";
 
 /**
  * @ru Поддерживаемый HTTP-метод REST-запроса. `QUERY` предназначен для совместимых
@@ -7,6 +7,11 @@ import type { HyperSender, ServerRequestContext, UniversalResponse } from "@hype
  * and proxies that support it.
  */
 export type HttpMethod = "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS" | "QUERY";
+
+export type RestHeaders =
+  | Headers
+  | Record<string, string | number | boolean>
+  | ReadonlyArray<readonly [string, string]>;
 
 /**
  * @ru Входные данные REST-запроса, используемые `core.send()` и методами `core.rest`.
@@ -26,7 +31,7 @@ export interface RestInput<TBody = unknown> {
   /** @ru Абсолютный или относительный URL. @en Absolute or relative URL. */
   url: string;
   /** @ru Заголовки запроса. @en Request headers. */
-  headers?: Record<string, string>;
+  headers?: RestHeaders;
   /** @ru Query-параметры, добавляемые к URL. @en Query parameters appended to the URL. */
   query?: Record<string, string | number | boolean | (string | number | boolean)[]>;
   /** @ru Тело запроса; plain object и массив сериализуются в JSON. @en Request body; plain objects and arrays are serialized as JSON. */
@@ -39,6 +44,8 @@ export interface RestInput<TBody = unknown> {
   followRedirects?: boolean;
   /** @ru Максимальное число redirect-ов, если транспорт поддерживает настройку. @en Maximum redirect count when supported by the transport. */
   maxRedirects?: number;
+  /** @ru Опция транспорта для stealth-режима. @en Transport-specific stealth mode. */
+  stealth?: boolean;
   /** @ru Сигнал отмены запроса. @en Request cancellation signal. */
   signal?: AbortSignal;
 }
@@ -154,15 +161,15 @@ declare module "@hyperttp/types" {
     rest: RestInput;
   }
 
-  interface HyperProtocols {
-    readonly rest: RestClientMethods;
+  interface ProtocolServerRequestMap {
+    rest: RestServerInput;
   }
 
-  interface BaseHyperClientOptions {
-    /**
-     * @ru Кастомный сендер протокола, заменяющий стандартный сендер для своего протокола.
-     * @en Custom protocol sender that overrides the default sender for its protocol.
-     */
-    customSender?: HyperSender;
+  interface ProtocolServerResponseMap {
+    rest: RestServerResponse;
+  }
+
+  interface HyperProtocols {
+    readonly rest: RestClientMethods;
   }
 }

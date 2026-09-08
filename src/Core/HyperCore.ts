@@ -1,4 +1,5 @@
 import type {
+  AnyHyperSender,
   HyperClientOptions,
   HyperPlugin,
   HyperProtocol,
@@ -19,6 +20,7 @@ import type {
   TransportServer,
   UniversalResponse,
 } from "@hyperttp/types";
+import { dynamicImport } from "../utils/modules.js";
 import { defaultCoreConfig } from "../defaultConfig.js";
 import { KNOWN_PROTOCOLS, resolveProtocol } from "../protocols/manager.js";
 import { evictCachedTransport, resolveTransport } from "../transports/manager.js";
@@ -453,9 +455,7 @@ export class HyperCore implements IHyperCore {
    * @param sender - The protocol sender to register.
    * @returns This instance for chaining.
    */
-  public registerSender<P extends SenderProtocol>(
-    sender: HyperSender<unknown, unknown, unknown, unknown, P>,
-  ): this {
+  public registerSender<P extends SenderProtocol>(sender: AnyHyperSender<P>): this {
     const existing = this.registry.get(sender.protocol);
     return this.registerProtocol({
       protocol: sender.protocol,
@@ -649,10 +649,20 @@ export class HyperCore implements IHyperCore {
         (customOnError as (error: unknown) => void)(err);
         return;
       } catch (handlerError) {
-        console.error("[HyperCore] Background error handler failed:", handlerError);
+        this.log("error", "[HyperCore] Background error handler failed", handlerError);
       }
     }
-    console.error("[HyperCore] Background plugin error:", err);
+    this.log("error", "[HyperCore] Background plugin error", err);
+  }
+
+  private log(level: "debug" | "info" | "warn" | "error", message: string, meta?: unknown): void {
+    if (this.config.logger) {
+      this.config.logger(level, message, meta);
+      return;
+    }
+    if (!this.config.verbose && level !== "error") return;
+    const output = level === "debug" ? console.debug : console[level];
+    output(message, meta);
   }
 
   /**
@@ -698,7 +708,11 @@ export class HyperCore implements IHyperCore {
   private async resolveAndRetainTransport(protocol: SenderProtocol): Promise<HyperTransport> {
     const transport =
       this.fixedTransport ??
-      (await resolveTransport(protocol, { customTransport: this.config.customTransport }));
+      (await resolveTransport(protocol, {
+        customTransport: this.config.customTransport,
+        logger: this.config.logger,
+        verbose: this.config.verbose,
+      }));
     const supportsProtocol =
       typeof transport.supports === "function"
         ? transport.supports(protocol)
@@ -818,6 +832,34 @@ export class HyperCore implements IHyperCore {
    * @param plugin - The plugin instance to register.
    * @returns This instance for chaining.
    */
+  /**
+   * Creates a core asynchronously and resolves plugin module paths before construction.
+   */
+  public static async create(config: Partial<HyperClientOptions> = {}): Promise<HyperCore> {
+    const plugins = config.plugins;
+    if (!plugins?.some((plugin) => typeof plugin === "string")) {
+      return new HyperCore(config);
+    }
+
+    const resolvedPlugins: HyperPlugin[] = [];
+    for (const plugin of plugins) {
+      if (typeof plugin !== "string") {
+        resolvedPlugins.push(plugin);
+        continue;
+      }
+      const module = await dynamicImport(plugin);
+      const candidate = module.default ?? module.plugin;
+      if (!candidate || typeof candidate !== "object") {
+        throw new HyperClientError(
+          `[HyperCore] Plugin module "${plugin}" must export a plugin object as default or "plugin".`,
+        );
+      }
+      resolvedPlugins.push(candidate as HyperPlugin);
+    }
+
+    return new HyperCore({ ...config, plugins: resolvedPlugins });
+  }
+
   public use(plugin: HyperPlugin): this {
     const enabled = plugin.enabled ? plugin.enabled(this.config) : true;
     if (!enabled) return this;

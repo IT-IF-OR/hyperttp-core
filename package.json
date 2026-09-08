@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
@@ -50,8 +50,9 @@
   },
   "scripts": {
     "build": "tsc && esbuild 'dist/**/*.js' --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
+    "lock:bun": "bun install --lockfile-only",
     "lock:deno": "deno check --node-modules-dir=auto --minimum-dependency-age=0 --lock=deno.lock --frozen=false dist/index.js",
-    "dist": "d-dist",
+    "dist": "npm run lock:bun && npm run lock:deno && d-dist",
     "deploy": "npm run build && npm run dist",
     "pub": "d-publish",
     "typecheck": "npm run typecheck:src && npm run typecheck:test",
@@ -62,25 +63,24 @@
     "format": "oxfmt src tests vitest.config.ts",
     "format:check": "oxfmt src tests vitest.config.ts --check",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@dirold2/dev-tools": "^1.1.3",
-    "@hyperttp/types": "^0.3.0",
-    "@types/bun": "^1.4.0",
-    "@types/deno": "^2.7.0",
-    "@types/node": "^26.4.0",
-    "chalk": "^6.0.0",
+    "@hyperttp/types": "^0.4.2",
+    "@types/node": "^26.5.0",
+    "@vitest/coverage-v8": "^5.0.0",
     "esbuild": "^0.28.2",
-    "oxfmt": "^0.65.0",
-    "oxlint": "^1.80.0",
-    "tsx": "^4.23.12",
+    "oxfmt": "^0.67.0",
+    "oxlint": "^1.82.0",
+    "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.3.0"
+    "@hyperttp/types": "^0.4.2"
   },
   "engines": {
     "node": ">=20"

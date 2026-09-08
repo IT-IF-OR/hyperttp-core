@@ -1,6 +1,7 @@
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
 import type {
   HyperTransport,
+  LogLevel,
   SenderProtocol,
   TransportListenOptions,
   TransportRequest,
@@ -23,6 +24,12 @@ export interface FetchTransportOptions {
    * HTTP 413 before the body reaches the handler.
    */
   maxBodyBytes?: number;
+  /**
+   * @ru Обработчик ошибок входящих серверных запросов.
+   * @en Error hook for incoming server requests.
+   */
+  onError?: (error: unknown, request: TransportRequest) => void;
+  logger?: (level: LogLevel, message: string, meta?: unknown) => void;
 }
 
 type ExtendedTransportRequest = TransportRequest & {
@@ -48,6 +55,8 @@ async function loadNodeHttp(): Promise<typeof import("node:http")> {
 export class FetchTransport implements HyperTransport {
   public readonly protocols: readonly SenderProtocol[];
   private readonly maxBodyBytes: number;
+  private readonly onError?: FetchTransportOptions["onError"];
+  private readonly logger?: FetchTransportOptions["logger"];
 
   /**
    * @ru Создаёт fallback-транспорт на базе глобального `fetch`.
@@ -57,6 +66,8 @@ export class FetchTransport implements HyperTransport {
   constructor(options: FetchTransportOptions = {}) {
     this.protocols = Object.freeze(options.protocols ?? ["rest"]);
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    this.onError = options.onError;
+    this.logger = options.logger;
   }
 
   public async execute(req: TransportRequest): Promise<TransportResponse> {
@@ -196,7 +207,14 @@ export class FetchTransport implements HyperTransport {
         } else {
           res.end();
         }
-      } catch {
+      } catch (error) {
+        this.onError?.(error, {
+          method: req.method ?? "GET",
+          url: req.url ?? "/",
+          headers: req.headers as Record<string, string | string[]>,
+          signal: requestController.signal,
+          protocol: this.protocols[0] ?? "rest",
+        });
         if (!res.headersSent) {
           res.writeHead(500);
           res.end("Internal Server Error");
@@ -229,7 +247,12 @@ export class FetchTransport implements HyperTransport {
       void close();
     };
     const reportRuntimeError = (error: Error) => {
-      console.error("[FetchTransport] HTTP server error:", error);
+      const message = "[FetchTransport] HTTP server error";
+      if (this.logger) {
+        this.logger("error", message, error);
+      } else {
+        console.error(`${message}:`, error);
+      }
     };
 
     if (signal?.aborted) {

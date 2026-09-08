@@ -1,12 +1,12 @@
 import type { HyperProtocol, HyperReceiver, HyperSender, SenderProtocol } from "@hyperttp/types";
 import { HyperClientError } from "../utils/errors.js";
+import { dynamicImport, isModuleNotFoundError } from "../utils/modules.js";
 import { RestProtocol } from "./rest/index.js";
 
 type ProtocolDef = {
   readonly protocol: SenderProtocol;
   readonly pkg: string;
   readonly export: string;
-  readonly priority: number;
 };
 
 const PROTOCOL_DEFS: readonly ProtocolDef[] = [
@@ -14,24 +14,21 @@ const PROTOCOL_DEFS: readonly ProtocolDef[] = [
     protocol: "graphql",
     pkg: "@hyperttp/protocol-graphql",
     export: "GraphQLProtocol",
-    priority: 100,
   },
-  { protocol: "grpc", pkg: "@hyperttp/protocol-grpc", export: "GrpcProtocol", priority: 100 },
-  { protocol: "trpc", pkg: "@hyperttp/protocol-trpc", export: "TrpcProtocol", priority: 100 },
+  { protocol: "grpc", pkg: "@hyperttp/protocol-grpc", export: "GrpcProtocol" },
+  { protocol: "trpc", pkg: "@hyperttp/protocol-trpc", export: "TrpcProtocol" },
   {
     protocol: "ws",
     pkg: "@hyperttp/protocol-websocket",
     export: "WebSocketProtocol",
-    priority: 100,
   },
   {
     protocol: "websocket",
     pkg: "@hyperttp/protocol-websocket",
     export: "WebSocketProtocol",
-    priority: 90,
   },
-  { protocol: "sse", pkg: "@hyperttp/protocol-sse", export: "SseProtocol", priority: 100 },
-  { protocol: "mqtt", pkg: "@hyperttp/protocol-mqtt", export: "MqttProtocol", priority: 100 },
+  { protocol: "sse", pkg: "@hyperttp/protocol-sse", export: "SseProtocol" },
+  { protocol: "mqtt", pkg: "@hyperttp/protocol-mqtt", export: "MqttProtocol" },
 ];
 
 /**
@@ -44,24 +41,6 @@ export const KNOWN_PROTOCOLS: readonly SenderProtocol[] = Object.freeze([
 ]);
 
 const protocolCache = new Map<string, HyperProtocol>();
-
-function isModuleNotFoundError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as Record<string, unknown>;
-  if (e.code === "ERR_MODULE_NOT_FOUND" || e.code === "MODULE_NOT_FOUND") return true;
-
-  const msg = err instanceof Error ? err.message : String(e.message ?? "");
-  return (
-    msg.includes("Cannot find module") ||
-    msg.includes("Failed to resolve") ||
-    msg.includes("Failed to load")
-  );
-}
-
-async function dynamicImport(pkg: string): Promise<Record<string, unknown>> {
-  /* @vite-ignore */
-  return import(/* webpackIgnore: true */ pkg);
-}
 
 /**
  * @ru Разрешает модуль протокола. Встроенный rest возвращается статически,

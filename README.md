@@ -67,9 +67,9 @@ npm install @hyperttp/core @hyperttp/types
 ```
 
 Compatible optimized transports can be installed separately. Ensure the selected transport release
-declares compatibility with `@hyperttp/types@^0.3.0`; older transport releases target the v1 type
-contracts and cannot be installed alongside core 2.0. Without an optional transport package, the
-core uses its built-in `FetchTransport` fallback.
+declares compatibility with `@hyperttp/types@^0.4.2`; older transport releases target incompatible
+type contracts and cannot be installed alongside core 2.0. Without an optional transport package,
+the core uses its built-in `FetchTransport` fallback.
 
 ## Client quick start
 
