@@ -33,7 +33,7 @@ describe("RestSender.prepare", () => {
     expect(prepared.url).toBe("/users?page=1&tags=a&tags=b");
   });
 
-  it("serializes plain-object bodies to JSON and sets content-type", () => {
+  it("serializes plain-object bodies to a JSON buffer and sets content-type", () => {
     const sender = new RestSender();
     const prepared = sender.prepare(
       { protocol: "rest", input: { method: "POST", url: "/post", body: { ok: true } } },
@@ -41,7 +41,7 @@ describe("RestSender.prepare", () => {
     );
 
     expect(prepared.method).toBe("POST");
-    expect(prepared.body).toBe('{"ok":true}');
+    expect(prepared.body).toEqual(Buffer.from('{"ok":true}'));
     expect(prepared.headers?.["content-type"]).toBe("application/json; charset=utf-8");
   });
 

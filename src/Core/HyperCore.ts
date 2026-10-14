@@ -942,12 +942,16 @@ export class HyperCore implements IHyperCore {
 
       evictCachedTransport(transport);
 
-      if (graceful && typeof transport.close === "function") {
-        await transport.close();
-      } else if (typeof transport.destroy === "function") {
-        await transport.destroy();
-      } else if (typeof transport.close === "function") {
-        await transport.close();
+      try {
+        if (graceful && typeof transport.close === "function") {
+          await transport.close();
+        } else if (typeof transport.destroy === "function") {
+          await transport.destroy();
+        } else if (typeof transport.close === "function") {
+          await transport.close();
+        }
+      } catch (err) {
+        this.log("error", "[HyperCore] Error closing transport during destroy", err);
       }
     }
   }

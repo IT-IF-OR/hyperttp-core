@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.3] — 2026-10-14
+
+### Fixed
+
+- Transport shutdown failures no longer interrupt core destruction or unused transport cleanup; `HyperCore.destroy()` logs a close failure and continues releasing the remaining transports.
+- Custom transports are now cached per protocol, so later requests reuse the configured transport instead of resolving a new one.
+
+### Changed
+
+- REST sender request bodies that are JSON-serializable objects, arrays or strings are now encoded as `Buffer` instances before transport execution.
+- Updated development tooling, including Node.js types, Vitest, Oxlint, Oxfmt and tsx.
+
 ## [2.0.2] — 2026-09-09
 
 ### Added

@@ -230,10 +230,12 @@ export class RestSender implements HyperSender<
     let body = input.body;
 
     if (body !== undefined && body !== null && (isPlainObject(body) || Array.isArray(body))) {
-      body = JSON.stringify(body);
+      body = Buffer.from(JSON.stringify(body));
       if (!headers["content-type"]) {
         headers["content-type"] = "application/json; charset=utf-8";
       }
+    } else if (typeof body === "string") {
+      body = Buffer.from(body);
     }
 
     const prepared = {

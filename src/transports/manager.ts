@@ -49,10 +49,14 @@ function supportsProtocol(transport: HyperTransport, protocol: SenderProtocol): 
 }
 
 async function disposeUnusedTransport(transport: HyperTransport): Promise<void> {
-  if (typeof transport.destroy === "function") {
-    await transport.destroy();
-  } else if (typeof transport.close === "function") {
-    await transport.close();
+  try {
+    if (typeof transport.destroy === "function") {
+      await transport.destroy();
+    } else if (typeof transport.close === "function") {
+      await transport.close();
+    }
+  } catch {
+    //
   }
 }
 
@@ -111,6 +115,7 @@ export async function resolveTransport(
     if (!supportsProtocol(config.customTransport, protocol)) {
       throw new Error(`[HyperCore] Custom transport does not support protocol "${protocol}".`);
     }
+    transportCache.set(protocol, config.customTransport);
     return config.customTransport;
   }
 
