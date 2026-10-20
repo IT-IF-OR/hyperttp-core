@@ -13,6 +13,13 @@ export type Runtime = "bun" | "node" | "deno" | "browser";
  */
 export interface ResolveTransportOptions {
   customTransport?: HyperTransport;
+  /**
+   * @ru Требует серверную роль транспорта. При её отсутствии используется
+   * встроенный `FetchTransport`.
+   * @en Requires the transport server role. When unavailable, the built-in
+   * `FetchTransport` is used.
+   */
+  requireListen?: boolean;
   logger?: (level: LogLevel, message: string, meta?: unknown) => void;
   verbose?: boolean;
   [key: string]: unknown;
@@ -42,6 +49,14 @@ const CANDIDATES = TRANSPORT_DEFS.filter((t) => t.runtime.includes(CURRENT_RUNTI
 const transportCache = new Map<string, HyperTransport>();
 const transportResolutions = new Map<string, Promise<HyperTransport>>();
 
+function getCacheKey(protocol: SenderProtocol, requireListen = false): string {
+  return requireListen ? `${protocol}:listen` : protocol;
+}
+
+function supportsListen(transport: HyperTransport): boolean {
+  return typeof transport.listen === "function";
+}
+
 function supportsProtocol(transport: HyperTransport, protocol: SenderProtocol): boolean {
   return typeof transport.supports === "function"
     ? transport.supports(protocol)
@@ -60,6 +75,19 @@ async function disposeUnusedTransport(transport: HyperTransport): Promise<void> 
   }
 }
 
+async function createFetchTransport(
+  protocol: SenderProtocol,
+  config?: ResolveTransportOptions,
+): Promise<HyperTransport> {
+  const fetchTransport = new FetchTransport(config as unknown as FetchTransportOptions);
+  if (supportsProtocol(fetchTransport, protocol)) return fetchTransport;
+
+  await disposeUnusedTransport(fetchTransport);
+  throw new Error(
+    `[HyperCore] No transport available for protocol "${protocol}" in runtime "${CURRENT_RUNTIME}".`,
+  );
+}
+
 async function createTransport(
   protocol: SenderProtocol,
   config?: ResolveTransportOptions,
@@ -74,7 +102,10 @@ async function createTransport(
       if (typeof candidate !== "function") continue;
 
       const instance = new candidate(config ?? {});
-      if (!supportsProtocol(instance, protocol)) {
+      if (
+        !supportsProtocol(instance, protocol) ||
+        (config?.requireListen && !supportsListen(instance))
+      ) {
         await disposeUnusedTransport(instance);
         continue;
       }
@@ -85,20 +116,14 @@ async function createTransport(
     }
   }
 
-  const message = `[HyperCore] Fast transport (e.g. @hyperttp/transport-undici) unavailable for runtime "${CURRENT_RUNTIME}". Falling back to slow FetchTransport.`;
+  const message = `[HyperCore] Fast transport (e.g. @hyperttp/transport-undici) unavailable or missing listen() for runtime "${CURRENT_RUNTIME}". Falling back to slow FetchTransport.`;
   if (config?.logger) {
     config.logger("warn", message);
   } else if (config?.verbose) {
     console.warn(message);
   }
 
-  const fetchTransport = new FetchTransport(config as unknown as FetchTransportOptions);
-  if (supportsProtocol(fetchTransport, protocol)) return fetchTransport;
-
-  await disposeUnusedTransport(fetchTransport);
-  throw new Error(
-    `[HyperCore] No transport available for protocol "${protocol}" in runtime "${CURRENT_RUNTIME}".`,
-  );
+  return createFetchTransport(protocol, config);
 }
 
 /**
@@ -111,30 +136,38 @@ export async function resolveTransport(
   protocol: SenderProtocol = "rest",
   config?: ResolveTransportOptions,
 ): Promise<HyperTransport> {
+  const requireListen = config?.requireListen ?? false;
+  const cacheKey = getCacheKey(protocol, requireListen);
+
   if (config?.customTransport) {
     if (!supportsProtocol(config.customTransport, protocol)) {
       throw new Error(`[HyperCore] Custom transport does not support protocol "${protocol}".`);
     }
-    transportCache.set(protocol, config.customTransport);
-    return config.customTransport;
+
+    const transport =
+      requireListen && !supportsListen(config.customTransport)
+        ? await createFetchTransport(protocol, config)
+        : config.customTransport;
+    transportCache.set(cacheKey, transport);
+    return transport;
   }
 
-  const cached = transportCache.get(protocol);
+  const cached = transportCache.get(cacheKey);
   if (cached) return cached;
 
-  const pending = transportResolutions.get(protocol);
+  const pending = transportResolutions.get(cacheKey);
   if (pending) return pending;
 
   const resolution = createTransport(protocol, config)
     .then((transport) => {
-      transportCache.set(protocol, transport);
+      transportCache.set(cacheKey, transport);
       return transport;
     })
     .finally(() => {
-      transportResolutions.delete(protocol);
+      transportResolutions.delete(cacheKey);
     });
 
-  transportResolutions.set(protocol, resolution);
+  transportResolutions.set(cacheKey, resolution);
   return resolution;
 }
 

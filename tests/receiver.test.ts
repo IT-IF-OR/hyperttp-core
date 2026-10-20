@@ -11,6 +11,7 @@ import type {
 } from "@hyperttp/types";
 import type { RestServerResponse } from "../src/protocols/rest/type.js";
 import { RestSender } from "../src/index.js";
+import { FetchTransport } from "../src/transports/fetch.js";
 
 function makeRawRequest(overrides: Partial<TransportRequest> = {}): TransportRequest {
   return {
@@ -190,16 +191,26 @@ describe("HyperCore.listen (server role)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("throws when the transport does not support the server role", async () => {
-    const clientOnly = {
-      async execute(req: TransportRequest) {
-        return { status: 200, headers: {}, url: req.url, body: undefined };
-      },
-      close: async () => {},
-    };
+  it("uses FetchTransport for listen() when the client transport has no server role", async () => {
+    const execute = vi.fn(async (req: TransportRequest) => ({
+      status: 200,
+      headers: {},
+      url: req.url,
+      body: undefined,
+    }));
+    const clientOnly = { execute, close: async () => {} };
+    const serverHandle = { close: vi.fn(async () => {}) };
+    const listen = vi.spyOn(FetchTransport.prototype, "listen").mockResolvedValue(serverHandle);
     const core = new HyperCore({}, clientOnly as HyperTransport);
 
-    await expect(core.listen({ protocol: "rest" })).rejects.toThrow(/does not support listen\(\)/);
+    await expect(core.listen({ protocol: "rest" })).resolves.toBe(serverHandle);
+    expect(listen).toHaveBeenCalledOnce();
+
+    await core.send({ protocol: "rest", input: { method: "GET", url: "/client" } });
+    expect(execute).toHaveBeenCalledOnce();
+
+    await core.destroy();
+    expect(serverHandle.close).toHaveBeenCalledOnce();
   });
 
   it("destroy closes active servers and the transport", async () => {

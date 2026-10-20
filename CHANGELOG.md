@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.0.4] — 2026-10-20
+
+### Fixed
+
+- `HyperCore.listen()` now falls back to the built-in `FetchTransport` when the selected client transport has no server `listen()` capability, while preserving that transport for client requests.
+
 ## [2.0.3] — 2026-10-14
 
 ### Fixed

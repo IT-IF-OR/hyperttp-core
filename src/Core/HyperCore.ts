@@ -202,6 +202,8 @@ export class HyperCore implements IHyperCore {
   private readonly generatedFlatMethods = new Set<string>();
   private readonly transportPromises = new Map<SenderProtocol, Promise<HyperTransport>>();
   private readonly transports = new Map<SenderProtocol, HyperTransport>();
+  private readonly listenTransportPromises = new Map<SenderProtocol, Promise<HyperTransport>>();
+  private readonly listenTransports = new Map<SenderProtocol, HyperTransport>();
   private readonly retainedTransports = new Set<HyperTransport>();
   private readonly fixedTransport: HyperTransport | null;
   private destroyPromise: Promise<void> | null = null;
@@ -671,27 +673,32 @@ export class HyperCore implements IHyperCore {
    * @en Atomically acquires a transport for a protocol and retains each physical
    * instance exactly once for the lifetime of this core.
    */
-  private async acquireTransport(protocol: SenderProtocol = "rest"): Promise<HyperTransport> {
+  private async acquireTransport(
+    protocol: SenderProtocol = "rest",
+    requireListen = false,
+  ): Promise<HyperTransport> {
     if (this.isDestroyed) {
       throw new HyperClientError(
         "[HyperCore] Cannot acquire transport on a destroyed core instance.",
       );
     }
 
-    const existing = this.transports.get(protocol);
+    const transports = requireListen ? this.listenTransports : this.transports;
+    const transportPromises = requireListen ? this.listenTransportPromises : this.transportPromises;
+    const existing = transports.get(protocol);
     if (existing) return existing;
 
-    let pending = this.transportPromises.get(protocol);
+    let pending = transportPromises.get(protocol);
     if (!pending) {
-      pending = this.resolveAndRetainTransport(protocol);
+      pending = this.resolveAndRetainTransport(protocol, requireListen);
       let tracked!: Promise<HyperTransport>;
       tracked = pending.catch((err: unknown) => {
-        if (this.transportPromises.get(protocol) === tracked) {
-          this.transportPromises.delete(protocol);
+        if (transportPromises.get(protocol) === tracked) {
+          transportPromises.delete(protocol);
         }
         throw err;
       });
-      this.transportPromises.set(protocol, tracked);
+      transportPromises.set(protocol, tracked);
       pending = tracked;
     }
 
@@ -705,14 +712,19 @@ export class HyperCore implements IHyperCore {
     return transport;
   }
 
-  private async resolveAndRetainTransport(protocol: SenderProtocol): Promise<HyperTransport> {
+  private async resolveAndRetainTransport(
+    protocol: SenderProtocol,
+    requireListen = false,
+  ): Promise<HyperTransport> {
     const transport =
-      this.fixedTransport ??
-      (await resolveTransport(protocol, {
-        customTransport: this.config.customTransport,
-        logger: this.config.logger,
-        verbose: this.config.verbose,
-      }));
+      this.fixedTransport && (!requireListen || typeof this.fixedTransport.listen === "function")
+        ? this.fixedTransport
+        : await resolveTransport(protocol, {
+            customTransport: this.fixedTransport ?? this.config.customTransport,
+            requireListen,
+            logger: this.config.logger,
+            verbose: this.config.verbose,
+          });
     const supportsProtocol =
       typeof transport.supports === "function"
         ? transport.supports(protocol)
@@ -724,19 +736,20 @@ export class HyperCore implements IHyperCore {
       );
     }
 
-    return this.retainResolvedTransport(protocol, transport);
+    return this.retainResolvedTransport(protocol, transport, requireListen);
   }
 
   private retainResolvedTransport(
     protocol: SenderProtocol,
     transport: HyperTransport,
+    requireListen = false,
   ): HyperTransport {
     if (!this.retainedTransports.has(transport)) {
       retainTransport(transport);
       this.retainedTransports.add(transport);
     }
 
-    this.transports.set(protocol, transport);
+    (requireListen ? this.listenTransports : this.transports).set(protocol, transport);
     return transport;
   }
 
@@ -774,7 +787,7 @@ export class HyperCore implements IHyperCore {
   public async listen<P extends SenderProtocol = SenderProtocol>(
     options: HyperServerListenOptions<P>,
   ): Promise<TransportServer> {
-    const transport = await this.acquireTransport(options.protocol);
+    const transport = await this.acquireTransport(options.protocol, true);
 
     if (typeof transport.listen !== "function") {
       throw new HyperClientError(
@@ -930,9 +943,14 @@ export class HyperCore implements IHyperCore {
     }
     this.servers.clear();
 
-    await Promise.allSettled(this.transportPromises.values());
+    await Promise.allSettled([
+      ...this.transportPromises.values(),
+      ...this.listenTransportPromises.values(),
+    ]);
     this.transportPromises.clear();
     this.transports.clear();
+    this.listenTransportPromises.clear();
+    this.listenTransports.clear();
 
     const transports = [...this.retainedTransports];
     this.retainedTransports.clear();

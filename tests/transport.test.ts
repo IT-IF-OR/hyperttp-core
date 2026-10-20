@@ -68,6 +68,24 @@ describe("resolveTransport fallback", () => {
     expect(transport).toBe(custom);
   });
 
+  it("uses FetchTransport for listen when a custom transport has no listen()", async () => {
+    const clientOnly = {
+      async execute(req: TransportRequest) {
+        return { status: 200, headers: {}, url: req.url, body: undefined };
+      },
+    } as HyperTransport;
+
+    const clientTransport = await resolveTransport("rest", { customTransport: clientOnly });
+    const serverTransport = await resolveTransport("rest", {
+      customTransport: clientOnly,
+      requireListen: true,
+    });
+
+    expect(clientTransport).toBe(clientOnly);
+    expect(serverTransport).toBeInstanceOf(FetchTransport);
+    expect(getCachedTransport("rest")).toBe(clientOnly);
+  });
+
   it("evicts a cached transport after its last core releases it", async () => {
     const firstCore = new HyperCore();
     await firstCore.getTransportName();
