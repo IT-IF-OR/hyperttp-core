@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["export { HyperCore } from \"./Core/index.js\";\nexport { HyperClientError, TimeoutError } from \"./utils/errors.js\";\nexport { deepMerge } from \"./utils/merge.js\";\nexport { RestProtocol, RestReceiver, RestSender } from \"./protocols/rest/index.js\";\nexport {\n  KNOWN_PROTOCOLS,\n  resetCachedProtocols,\n  resolveProtocol,\n  resolveReceiver,\n  resolveSender,\n} from \"./protocols/manager.js\";\n"],
+  "mappings": "aAAA,OAAS,cAAiB,kBAC1B,OAAS,iBAAkB,iBAAoB,oBAC/C,OAAS,cAAiB,mBAC1B,OAAS,aAAc,aAAc,eAAkB,4BACvD,OACE,gBACA,qBACA,gBACA,gBACA,kBACK",
+  "names": []
+}
