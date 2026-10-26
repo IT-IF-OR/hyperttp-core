@@ -36,15 +36,54 @@ type TransportDef = {
   readonly runtime: readonly Runtime[];
   readonly pkg: string;
   readonly export: string;
+  /** Protocols that require this transport family. Omitted for generic transports. */
+  readonly protocols?: readonly SenderProtocol[];
 };
 
+const ALL_RUNTIMES: readonly Runtime[] = ["bun", "node", "deno", "browser"];
+
 const TRANSPORT_DEFS: readonly TransportDef[] = [
+  {
+    protocols: ["webrtc"],
+    runtime: ALL_RUNTIMES,
+    pkg: "@hyperttp/transport-webrtc",
+    export: "WebRtcTransport",
+  },
+  {
+    protocols: ["ws", "websocket"],
+    runtime: ALL_RUNTIMES,
+    pkg: "@hyperttp/transport-websocket",
+    export: "WebSocketTransport",
+  },
+  {
+    protocols: ["mqtt"],
+    runtime: ALL_RUNTIMES,
+    pkg: "@hyperttp/transport-mqtt",
+    export: "MqttTransport",
+  },
   { runtime: ["bun"], pkg: "@hyperttp/transport-bun", export: "BunTransport" },
   { runtime: ["node"], pkg: "@hyperttp/transport-undici", export: "UndiciTransport" },
   { runtime: ["deno"], pkg: "@hyperttp/transport-deno", export: "DenoTransport" },
 ];
 
-const CANDIDATES = TRANSPORT_DEFS.filter((t) => t.runtime.includes(CURRENT_RUNTIME));
+function getCandidates(protocol: SenderProtocol): readonly TransportDef[] {
+  return TRANSPORT_DEFS.filter(
+    (transport) =>
+      transport.runtime.includes(CURRENT_RUNTIME) &&
+      (!transport.protocols || transport.protocols.includes(protocol)),
+  );
+}
+
+function getTransportInstallHint(protocol: SenderProtocol): string {
+  const packages = new Set(
+    getCandidates(protocol)
+      .filter((transport) => transport.protocols?.includes(protocol))
+      .map((transport) => transport.pkg),
+  );
+  if (packages.size === 0) return "";
+
+  return ` Install ${[...packages].map((pkg) => `"${pkg}"`).join(" or ")}.`;
+}
 
 const transportCache = new Map<string, HyperTransport>();
 const transportResolutions = new Map<string, Promise<HyperTransport>>();
@@ -92,8 +131,9 @@ async function createTransport(
   protocol: SenderProtocol,
   config?: ResolveTransportOptions,
 ): Promise<HyperTransport> {
-  for (let i = 0; i < CANDIDATES.length; i++) {
-    const t = CANDIDATES[i]!;
+  const candidates = getCandidates(protocol);
+  for (let i = 0; i < candidates.length; i++) {
+    const t = candidates[i]!;
     try {
       const mod = await dynamicImport(t.pkg);
       const candidate = (mod[t.export] ?? mod.default) as
@@ -116,14 +156,20 @@ async function createTransport(
     }
   }
 
-  const message = `[HyperCore] Fast transport (e.g. @hyperttp/transport-undici) unavailable or missing listen() for runtime "${CURRENT_RUNTIME}". Falling back to slow FetchTransport.`;
-  if (config?.logger) {
-    config.logger("warn", message);
-  } else if (config?.verbose) {
-    console.warn(message);
+  try {
+    const fetchTransport = await createFetchTransport(protocol, config);
+    const message = `[HyperCore] Packaged transport unavailable or missing listen() for protocol "${protocol}" in runtime "${CURRENT_RUNTIME}". Falling back to FetchTransport.`;
+    if (config?.logger) {
+      config.logger("warn", message);
+    } else if (config?.verbose) {
+      console.warn(message);
+    }
+    return fetchTransport;
+  } catch {
+    throw new Error(
+      `[HyperCore] No transport available for protocol "${protocol}" in runtime "${CURRENT_RUNTIME}".${getTransportInstallHint(protocol)}`,
+    );
   }
-
-  return createFetchTransport(protocol, config);
 }
 
 /**

@@ -1,4 +1,10 @@
-import type { HyperProtocol, HyperReceiver, HyperSender, SenderProtocol } from "@hyperttp/types";
+import type {
+  AnyHyperProtocol,
+  HyperProtocol,
+  HyperReceiver,
+  HyperSender,
+  SenderProtocol,
+} from "@hyperttp/types";
 import { HyperClientError } from "../utils/errors.js";
 import { dynamicImport, isModuleNotFoundError } from "../utils/modules.js";
 import { RestProtocol } from "./rest/index.js";
@@ -29,6 +35,7 @@ const PROTOCOL_DEFS: readonly ProtocolDef[] = [
   },
   { protocol: "sse", pkg: "@hyperttp/protocol-sse", export: "SseProtocol" },
   { protocol: "mqtt", pkg: "@hyperttp/protocol-mqtt", export: "MqttProtocol" },
+  { protocol: "webrtc", pkg: "@hyperttp/protocol-webrtc", export: "WebRtcProtocol" },
 ];
 
 /**
@@ -40,7 +47,7 @@ export const KNOWN_PROTOCOLS: readonly SenderProtocol[] = Object.freeze([
   ...PROTOCOL_DEFS.map((d) => d.protocol),
 ]);
 
-const protocolCache = new Map<string, HyperProtocol>();
+const protocolCache = new Map<string, AnyHyperProtocol>();
 
 /**
  * @ru Разрешает модуль протокола. Встроенный rest возвращается статически,
@@ -54,12 +61,12 @@ export async function resolveProtocol<P extends SenderProtocol>(
 ): Promise<HyperProtocol<unknown, unknown, unknown, unknown, P>> {
   const cached = protocolCache.get(protocol);
   if (cached) {
-    return cached as HyperProtocol<unknown, unknown, unknown, unknown, P>;
+    return cached as AnyHyperProtocol<P>;
   }
 
   if (protocol === "rest") {
     protocolCache.set(protocol, RestProtocol);
-    return RestProtocol as HyperProtocol<unknown, unknown, unknown, unknown, P>;
+    return RestProtocol as AnyHyperProtocol<P>;
   }
 
   for (let i = 0; i < PROTOCOL_DEFS.length; i++) {
@@ -69,16 +76,16 @@ export async function resolveProtocol<P extends SenderProtocol>(
     try {
       const mod = await dynamicImport(def.pkg);
       const candidate = (mod[def.export] ?? mod.default) as
-        | { new (opts?: unknown): HyperProtocol }
-        | HyperProtocol
+        | { new (opts?: unknown): AnyHyperProtocol }
+        | AnyHyperProtocol
         | undefined;
       const instance =
-        typeof candidate === "function" ? new candidate(options) : (candidate as HyperProtocol);
+        typeof candidate === "function" ? new candidate(options) : (candidate as AnyHyperProtocol);
 
       if (!instance || typeof instance.protocol !== "string") continue;
 
       protocolCache.set(protocol, instance);
-      return instance as HyperProtocol<unknown, unknown, unknown, unknown, P>;
+      return instance as AnyHyperProtocol<P>;
     } catch (err) {
       if (!isModuleNotFoundError(err)) throw err;
     }

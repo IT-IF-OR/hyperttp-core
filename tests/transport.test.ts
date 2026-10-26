@@ -49,6 +49,14 @@ describe("resolveTransport fallback", () => {
     await expect(resolveTransport("grpc")).rejects.toThrow(/No transport available/);
   });
 
+  it.each([
+    ["webrtc", "@hyperttp/transport-webrtc"],
+    ["websocket", "@hyperttp/transport-websocket"],
+    ["mqtt", "@hyperttp/transport-mqtt"],
+  ])("explains how to install the required %s transport", async (protocol, transportPackage) => {
+    await expect(resolveTransport(protocol)).rejects.toThrow(`Install "${transportPackage}"`);
+  });
+
   it("defaults the protocol to http when omitted", async () => {
     const transport = await resolveTransport();
     expect(transport).toBeInstanceOf(FetchTransport);

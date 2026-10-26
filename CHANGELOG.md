@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.5] — 2026-10-26
+
+### Added
+
+- Added protocol-specific transport resolution for WebRTC, WebSocket and MQTT: their optional transport packages are selected before generic runtime transports.
+
+### Fixed
+
+- Fixed protocol-module caching and dynamic loading to retain concrete sender and receiver input types (such as REST inputs) instead of incorrectly requiring `HyperProtocol<unknown, ...>`.
+- Explicitly registered external protocol modules expose their sender namespace immediately, including protocols registered after core creation (for example, `core.webrtc.connect(...)`), without requiring an entry in `KNOWN_PROTOCOLS`.
+
 ## [2.0.4] — 2026-10-20
 
 ### Fixed

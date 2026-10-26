@@ -121,6 +121,41 @@ describe("HyperCore (universal core)", () => {
     expect(flatRes.url).toBe("/flat");
   });
 
+  it("exposes namespaces for externally registered protocols", async () => {
+    const core = new HyperCore({}, makeMockTransport());
+    const connect = vi.fn(
+      (client: { send: (request: unknown) => Promise<unknown> }, peerUrl: string) =>
+        client.send({ protocol: "webrtc", input: { peerUrl } }),
+    );
+
+    core.registerProtocol({
+      protocol: "webrtc",
+      sender: {
+        protocol: "webrtc",
+        methods: { connect },
+        prepare: (request) => request.input,
+        send: async (prepared) => prepared,
+        parse: (raw) => ({
+          protocol: "webrtc",
+          ok: true,
+          status: 200,
+          headers: {},
+          data: raw,
+        }),
+      },
+    });
+
+    const webrtc = (
+      core as unknown as {
+        webrtc: { connect(peerUrl: string): Promise<UniversalResponse<{ peerUrl: string }>> };
+      }
+    ).webrtc;
+    const response = await webrtc.connect("webrtc://peer.example");
+
+    expect(connect).toHaveBeenCalledOnce();
+    expect(response.data).toEqual({ peerUrl: "webrtc://peer.example" });
+  });
+
   it("lazily resolves the sender when the rest namespace is used without registration", async () => {
     const core = new HyperCore({}, makeMockTransport());
     const res = await core.rest.get("/lazy-rest");
