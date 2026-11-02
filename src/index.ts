@@ -9,3 +9,5 @@ export {
   resolveReceiver,
   resolveSender,
 } from "./protocols/manager.js";
+
+export type { CorePluginFactory, ServerPluginContext, ServerRequestOutcome } from "@hyperttp/types";

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, expectTypeOf, vi } from "vitest";
 import { HyperCore, HyperClientError, RestSender, TimeoutError } from "../src/index.js";
 import type {
   HyperProtocol,
@@ -577,7 +577,7 @@ describe("HyperCore (universal core)", () => {
     const core = new HyperCore({ customTransport: transport });
 
     const server = await core.listen({ protocol: "rest" });
-    expect(server).toBe(serverHandle);
+    expect(server.close).toBeTypeOf("function");
 
     await core.destroy();
     expect(serverHandle.close).toHaveBeenCalledTimes(1);
@@ -644,5 +644,318 @@ describe("HyperCore (universal core)", () => {
       await core.destroy();
       vi.useRealTimers();
     }
+  });
+});
+
+describe("HyperCore lifecycle regressions", () => {
+  it("graceful destroy waits for accepted requests including settlement", async () => {
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const transport = {
+      ...makeMockTransport(),
+      execute: async () => {
+        started();
+        await gate;
+        return { status: 200, headers: {}, body: undefined };
+      },
+    };
+    const core = makeCore(transport);
+    const request = core.rest.get("/active");
+    await entered;
+    let done = false;
+    const destroying = core.destroy();
+    expect(core.destroy()).toBe(destroying);
+    void destroying.then(() => {
+      done = true;
+    });
+    await Promise.resolve();
+    expect(done).toBe(false);
+    expect(transport.close).not.toHaveBeenCalled();
+    finish();
+    await request;
+    await destroying;
+    expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("settles exactly once after recovery and isolates failing settlement callbacks", async () => {
+    const outcomes: unknown[] = [];
+    const core = makeCore({
+      execute: async () => {
+        throw new Error("network");
+      },
+    });
+    core.config.logger = vi.fn();
+    core.use({
+      name: "resource",
+      onRequest(_request, _plugin, ctx) {
+        ctx?.onSettled?.((outcome) => {
+          outcomes.push(outcome);
+          throw new Error("diagnostic");
+        });
+        ctx?.onSettled?.((outcome) => {
+          outcomes.push(outcome);
+        });
+      },
+    });
+    core.use({
+      name: "recover",
+      onError: () => ({ protocol: "rest", ok: true, status: 200, headers: {}, data: "recovered" }),
+    });
+    const response = await core.rest.get("/settle");
+    expect(outcomes).toEqual([
+      { ok: true, response },
+      { ok: true, response },
+    ]);
+    await core.destroy();
+  });
+
+  it("rejects settlement registration after finalization starts", async () => {
+    let context: RequestContext | undefined;
+    const core = makeCore();
+    core.use({
+      name: "observe",
+      onRequest(_request, _plugin, ctx) {
+        context = ctx;
+      },
+    });
+    await core.rest.get("/settle");
+    expect(() => context?.onSettled?.(() => {})).toThrow(/settlement/);
+    await core.destroy();
+  });
+
+  it("infers output from the documented single send generic", async () => {
+    const core = makeCore();
+    const result = core.send<{ ok: boolean }>({
+      protocol: "rest",
+      input: { method: "GET", url: "/types" },
+    });
+    expectTypeOf(result).toEqualTypeOf<Promise<UniversalResponse<{ ok: boolean }>>>();
+    expect((await result).data.ok).toBe(true);
+    await core.destroy();
+  });
+
+  const response = () => ({ protocol: "rest", ok: true, status: 200, headers: {}, data: "ok" });
+
+  it("reports a failure while processing a recovered response without retrying recovery", async () => {
+    const original = new Error("sender failed");
+    const failure = new Error("recovered response failed");
+    const errors: unknown[] = [];
+    const responses = vi.fn(() => {
+      throw failure;
+    });
+    const core = makeCore({
+      execute: async () => {
+        throw original;
+      },
+    });
+    core.use({
+      name: "recover",
+      onError: (error) => {
+        errors.push(error);
+        return response();
+      },
+    });
+    core.use({ name: "response", onResponse: responses });
+    await expect(core.rest.get("/local")).rejects.toBe(failure);
+    expect(errors).toEqual([original, failure]);
+    expect(responses).toHaveBeenCalledOnce();
+    await core.destroy();
+  });
+
+  it("runs remaining error hooks and response hooks after recovery", async () => {
+    const cleanup = vi.fn();
+    const observed = vi.fn();
+    const core = makeCore({
+      execute: async () => {
+        throw new Error("original");
+      },
+    });
+    core.use({ name: "recover", onError: response });
+    core.use({
+      name: "throwing",
+      onError() {
+        throw new Error("hook");
+      },
+    });
+    core.use({ name: "cleanup", onError: cleanup, onResponse: observed });
+    const logger = vi.fn();
+    core.config.logger = logger;
+    expect((await core.rest.get("/local")).data).toBe("ok");
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(observed).toHaveBeenCalledOnce();
+    expect(logger).toHaveBeenCalledOnce();
+    await core.destroy();
+  });
+
+  it("preserves each plugin request identity through replacements", async () => {
+    const core = makeCore();
+    let original: unknown;
+    let terminal: unknown;
+    core.use({
+      name: "primary",
+      onRequest(req) {
+        original = req;
+      },
+      onResponse(_res, req) {
+        terminal = req;
+      },
+    });
+    core.use({ name: "replace", phase: "FORMAT", onRequest: (req) => ({ ...req }) });
+    await core.rest.get("/local");
+    expect(terminal).toBe(original);
+    await core.destroy();
+  });
+
+  it("deduplicates instances and rejects unsafe cross-core reuse before setup", async () => {
+    const setup = vi.fn();
+    const hook = vi.fn();
+    const plugin = { name: "unique", setup, onRequest: hook };
+    const core = makeCore();
+    core.use(plugin).use(plugin);
+    expect(setup).toHaveBeenCalledOnce();
+    const other = makeCore();
+    expect(() => other.use(plugin)).toThrow(/cannot be shared/);
+    await core.rest.get("/local");
+    expect(hook).toHaveBeenCalledOnce();
+    await core.destroy();
+    await other.destroy();
+  });
+
+  it("requires fresh configured plugins when cloning a core", async () => {
+    const plugin = { name: "configured" };
+    const core = new HyperCore({ plugins: [plugin] });
+    expect(() => core.create({})).toThrow(/cannot be shared/);
+    const child = core.create({ plugins: [{ name: "fresh" }] });
+    await child.destroy();
+    await core.destroy();
+  });
+
+  it("rejects cached and short-circuit sends once shutdown starts", async () => {
+    let finish!: () => void;
+    const close = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const core = makeCore({ ...makeMockTransport(), close: () => close });
+    await core.rest.get("/warm");
+    const destroying = core.destroy();
+    await expect(core.rest.get("/late")).rejects.toThrow(/destroyed/);
+    finish();
+    await destroying;
+    const cached = new HyperCore({ plugins: [{ name: "cached", onRequest: response }] });
+    await cached.destroy();
+    await expect(
+      cached.send({ protocol: "rest", input: { method: "GET", url: "/late" } }),
+    ).rejects.toThrow(/destroyed/);
+  });
+
+  it("waits for pending listeners and closes their late server", async () => {
+    let finish!: (server: TransportServer) => void;
+    const transport = {
+      ...makeMockTransport(),
+      listen: vi.fn(
+        () =>
+          new Promise<TransportServer>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    const core = new HyperCore({}, transport);
+    const listening = core.listen({ protocol: "rest" });
+    const result = listening.catch((error) => error);
+    await vi.waitFor(() => expect(transport.listen).toHaveBeenCalledOnce());
+    let destroyed = false;
+    const destroying = core.destroy().then(() => {
+      destroyed = true;
+    });
+    await Promise.resolve();
+    expect(destroyed).toBe(false);
+    const server = { close: vi.fn(async () => {}) };
+    finish(server);
+    await destroying;
+    expect(await result).toBeInstanceOf(Error);
+    expect(server.close).toHaveBeenCalledOnce();
+  });
+
+  it("closes manually stopped servers exactly once", async () => {
+    const native = { close: vi.fn(async () => {}) };
+    const core = new HyperCore({}, { ...makeMockTransport(), listen: async () => native });
+    const server = await core.listen({ protocol: "rest" });
+    const first = server.close();
+    expect(server.close()).toBe(first);
+    await first;
+    await core.destroy();
+    expect(native.close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects sends during setup without retaining the injected transport twice", async () => {
+    const transport = makeMockTransport();
+    let request: Promise<unknown> | undefined;
+    const core = new HyperCore(
+      {
+        senders: [new RestSender()],
+        plugins: [
+          {
+            name: "startup",
+            setup({ core }) {
+              request = core.send({ protocol: "rest", input: { method: "GET", url: "/setup" } });
+            },
+          },
+        ],
+      },
+      transport,
+    );
+    await expect(request).rejects.toThrow(/initialization/);
+    await core.destroy();
+    expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("does not retain an injected transport when setup throws", async () => {
+    const transport = makeMockTransport();
+    expect(
+      () =>
+        new HyperCore(
+          {
+            plugins: [
+              {
+                name: "bad",
+                setup() {
+                  throw new Error("setup");
+                },
+              },
+            ],
+          },
+          transport,
+        ),
+    ).toThrow("setup");
+    const core = new HyperCore({}, transport);
+    await core.destroy();
+    expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("removes obsolete generated methods on sender replacement", async () => {
+    const core = makeCore();
+    const sender = new CustomRestSender();
+    core.registerSender(sender);
+    expect((core as unknown as Record<string, unknown>).post).toBeUndefined();
+    await core.destroy();
+  });
+
+  it("keeps shutdown running when the configured logger throws", async () => {
+    const core = makeCore({
+      ...makeMockTransport(),
+      close() {
+        throw new Error("close");
+      },
+    });
+    core.config.logger = () => {
+      throw new Error("logger");
+    };
+    await expect(core.destroy()).resolves.toBeUndefined();
   });
 });

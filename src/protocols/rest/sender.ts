@@ -14,6 +14,7 @@ import { applyTimeout } from "../../utils/abort.js";
 import { DEFAULT_STATUS_TEXTS, getHeaderValue } from "./utils.js";
 
 const STREAM_HINT = "rest:stream";
+const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 const REQUEST_CLEANUPS = new WeakMap<TransportRequest, () => void>();
 
@@ -52,12 +53,16 @@ async function collectBody(body: unknown): Promise<unknown> {
     const chunks: Uint8Array[] = [];
     let totalLength = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
-      chunks.push(chunk);
-      totalLength += chunk.byteLength;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+        chunks.push(chunk);
+        totalLength += chunk.byteLength;
+      }
+    } finally {
+      reader.releaseLock();
     }
 
     const collected = new Uint8Array(totalLength);
@@ -70,6 +75,130 @@ async function collectBody(body: unknown): Promise<unknown> {
   }
 
   return body;
+}
+
+function bindStream(
+  body: ReadableStream,
+  signal: AbortSignal | undefined,
+  cleanup: () => void,
+): ReadableStream {
+  const reader = body.getReader();
+  let finished = false;
+  let controller: ReadableStreamDefaultController;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    signal?.removeEventListener("abort", onAbort);
+    reader.releaseLock();
+    cleanup();
+  };
+  const cancel = async (reason: unknown) => {
+    try {
+      await reader.cancel(reason);
+    } finally {
+      finish();
+    }
+  };
+  const onAbort = () => {
+    controller.error(signal?.reason);
+    void cancel(signal?.reason).catch(() => {});
+  };
+  return new ReadableStream({
+    start(value) {
+      controller = value;
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) onAbort();
+    },
+    async pull() {
+      try {
+        const result = await reader.read();
+        if (finished) return;
+        if (result.done) {
+          controller.close();
+          finish();
+        } else {
+          controller.enqueue(result.value);
+        }
+      } catch (error) {
+        if (!finished) {
+          controller.error(error);
+          finish();
+        }
+      }
+    },
+    cancel,
+  });
+}
+
+function bindIterable(
+  body: AsyncIterable<unknown> & { destroy?: () => void },
+  signal: AbortSignal | undefined,
+  cleanup: () => void,
+): AsyncIterableIterator<unknown> {
+  const iterator = body[Symbol.asyncIterator]();
+  let finished = false;
+  let aborted = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    signal?.removeEventListener("abort", onAbort);
+    cleanup();
+  };
+  const onAbort = () => {
+    aborted = true;
+    finish();
+    // Node streams can interrupt a pending read; generic iterators may only queue return().
+    void (async () => {
+      try {
+        body.destroy?.();
+      } finally {
+        await iterator.return?.();
+      }
+    })().catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  return {
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    async next() {
+      if (aborted) throw signal?.reason;
+      if (finished) return { done: true, value: undefined };
+      let rejectRead!: () => void;
+      const abort = new Promise<never>((_resolve, reject) => {
+        rejectRead = () => reject(signal?.reason);
+        signal?.addEventListener("abort", rejectRead, { once: true });
+      });
+      try {
+        const result = await Promise.race([iterator.next(), abort]);
+        if (aborted) throw signal?.reason;
+        if (result.done) finish();
+        return result;
+      } catch (error) {
+        finish();
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", rejectRead);
+      }
+    },
+    async return(value?: unknown) {
+      try {
+        return (await iterator.return?.(value)) ?? { done: true, value };
+      } finally {
+        finish();
+      }
+    },
+    async throw(error?: unknown) {
+      try {
+        if (iterator.throw) return await iterator.throw(error);
+        await iterator.return?.();
+        throw error;
+      } finally {
+        finish();
+      }
+    },
+  };
 }
 
 export class RestSender implements HyperSender<
@@ -205,54 +334,57 @@ export class RestSender implements HyperSender<
       cleanupSignal = timeoutMeta.cleanupSignal;
     }
 
-    const headers: Record<string, string> = {};
+    try {
+      const headers: Record<string, string> = {};
 
-    if (input.headers) {
-      if (input.headers instanceof Headers) {
-        input.headers.forEach((value, key) => {
-          headers[key.toLowerCase()] = value;
-        });
-      } else if (Array.isArray(input.headers)) {
-        for (const [key, value] of input.headers) {
-          headers[key.toLowerCase()] = value;
-        }
-      } else {
-        for (const key in input.headers) {
-          const value = (input.headers as Record<string, unknown>)[key];
-
-          if (value != null) {
-            headers[key.toLowerCase()] = String(value);
+      if (input.headers) {
+        if (input.headers instanceof Headers) {
+          input.headers.forEach((value, key) => {
+            headers[key.toLowerCase()] = value;
+          });
+        } else if (Array.isArray(input.headers)) {
+          for (const [key, value] of input.headers) {
+            headers[key.toLowerCase()] = value;
+          }
+        } else {
+          for (const [key, value] of Object.entries(input.headers)) {
+            if (value != null) {
+              headers[key.toLowerCase()] = String(value);
+            }
           }
         }
       }
-    }
 
-    let body = input.body;
+      let body = input.body;
 
-    if (body !== undefined && body !== null && (isPlainObject(body) || Array.isArray(body))) {
-      body = Buffer.from(JSON.stringify(body));
-      if (!headers["content-type"]) {
-        headers["content-type"] = "application/json; charset=utf-8";
+      if (body !== undefined && body !== null && (isPlainObject(body) || Array.isArray(body))) {
+        body = TEXT_ENCODER.encode(JSON.stringify(body));
+        if (!headers["content-type"]) {
+          headers["content-type"] = "application/json; charset=utf-8";
+        }
+      } else if (typeof body === "string") {
+        body = TEXT_ENCODER.encode(body);
       }
-    } else if (typeof body === "string") {
-      body = Buffer.from(body);
+
+      const prepared = {
+        method: input.method.toUpperCase(),
+        url: this.buildUrl(input.url, input.query),
+        headers,
+        body,
+        signal,
+        protocol: this.protocol,
+        stream: input.stream,
+        stealth: input.stealth,
+        followRedirects: input.followRedirects,
+        maxRedirects: input.maxRedirects,
+      } as RestTransportRequest;
+
+      if (cleanupSignal) REQUEST_CLEANUPS.set(prepared, cleanupSignal);
+      return prepared;
+    } catch (error) {
+      cleanupSignal?.();
+      throw error;
     }
-
-    const prepared = {
-      method: input.method.toUpperCase(),
-      url: this.buildUrl(input.url, input.query),
-      headers,
-      body,
-      signal,
-      protocol: this.protocol,
-      stream: input.stream,
-      stealth: input.stealth,
-      followRedirects: input.followRedirects,
-      maxRedirects: input.maxRedirects,
-    } as RestTransportRequest;
-
-    if (cleanupSignal) REQUEST_CLEANUPS.set(prepared, cleanupSignal);
-    return prepared;
   }
 
   async send(
@@ -261,20 +393,40 @@ export class RestSender implements HyperSender<
     _ctx: RequestContext,
   ): Promise<TransportResponse> {
     const restRequest = prepared as RestTransportRequest;
+    const cleanup = () => {
+      const release = REQUEST_CLEANUPS.get(prepared);
+      REQUEST_CLEANUPS.delete(prepared);
+      release?.();
+    };
+    let streaming = false;
     try {
       const response = await transport.execute(prepared);
       if (restRequest.stream) {
+        if (typeof ReadableStream !== "undefined" && response.body instanceof ReadableStream) {
+          const body = bindStream(response.body, prepared.signal, cleanup);
+          streaming = true;
+          return { ...response, body, [STREAM_HINT]: true } as RestTransportResponse;
+        }
+        if (
+          response.body != null &&
+          typeof response.body === "object" &&
+          typeof (response.body as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function"
+        ) {
+          const body = bindIterable(
+            response.body as AsyncIterable<unknown>,
+            prepared.signal,
+            cleanup,
+          );
+          streaming = true;
+          return { ...response, body, [STREAM_HINT]: true } as RestTransportResponse;
+        }
         return { ...response, [STREAM_HINT]: true } as RestTransportResponse;
       }
 
       const body = await collectBody(response.body);
       return body === response.body ? response : { ...response, body };
     } finally {
-      const cleanup = REQUEST_CLEANUPS.get(prepared);
-      if (cleanup) {
-        REQUEST_CLEANUPS.delete(prepared);
-        cleanup();
-      }
+      if (!streaming) cleanup();
     }
   }
 

@@ -1,6 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 import { applyTimeout, createTimeoutSignal } from "../src/utils/abort.js";
 import { deepMerge } from "../src/utils/merge.js";
+import { HyperClientError, TimeoutError } from "../src/utils/errors.js";
+
+describe("error guards", () => {
+  it("recognizes native instances including custom HyperClientError codes", () => {
+    expect(HyperClientError.isHyperClientError(new HyperClientError("custom", "CUSTOM"))).toBe(
+      true,
+    );
+    const timeout = new TimeoutError("/local", 10);
+    expect(TimeoutError.isTimeoutError(timeout)).toBe(true);
+    expect(HyperClientError.isHyperClientError(timeout)).toBe(true);
+  });
+
+  it("recognizes coded Error objects from other bundles", () => {
+    expect(
+      HyperClientError.isHyperClientError(
+        Object.assign(new Error("external"), { code: "HYPER_ERROR" }),
+      ),
+    ).toBe(true);
+    expect(
+      TimeoutError.isTimeoutError(Object.assign(new Error("external"), { code: "TIMEOUT" })),
+    ).toBe(true);
+  });
+
+  it.each([
+    null,
+    undefined,
+    "TIMEOUT",
+    {},
+    { code: "TIMEOUT" },
+    { code: "HYPER_ERROR" },
+    new Error("plain"),
+    Object.assign(new Error("wrong"), { code: 42 }),
+  ])("rejects non-errors and unmatched codes: %j", (value) => {
+    expect(HyperClientError.isHyperClientError(value)).toBe(false);
+    expect(TimeoutError.isTimeoutError(value)).toBe(false);
+  });
+});
 
 describe("deepMerge", () => {
   it("recursively merges objects without mutating or sharing nested source objects", () => {

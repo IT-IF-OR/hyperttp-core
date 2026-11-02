@@ -39,8 +39,7 @@ function encodeUtf8(str: string): Uint8Array {
  * @en Parses a URL query string into a dictionary (supports repeated keys as arrays).
  */
 function parseQuery(queryString: string): Record<string, string | string[]> {
-  if (!queryString) return {};
-  const out: Record<string, string | string[]> = {};
+  const out: Record<string, string | string[]> = Object.create(null);
 
   for (const [key, value] of new URLSearchParams(queryString)) {
     const existing = out[key];
@@ -78,11 +77,21 @@ function parseTextBody(
 function decodeBody(raw: TransportRequest): unknown {
   const body = raw.body;
   if (body == null) return undefined;
+  const contentType = getHeaderValue(raw.headers, "content-type") ?? "";
+  const textual =
+    contentType.includes(JSON_TYPE) ||
+    contentType.includes("text/") ||
+    contentType.includes("application/xml") ||
+    contentType.includes("application/x-www-form-urlencoded");
   if (body instanceof Uint8Array) {
-    return parseTextBody(raw.headers, decodeUtf8(body));
+    return textual ? parseTextBody(raw.headers, decodeUtf8(body)) : body;
   }
   if (body instanceof ArrayBuffer) {
-    return parseTextBody(raw.headers, decodeArrayBuffer(body));
+    return textual ? parseTextBody(raw.headers, decodeArrayBuffer(body)) : new Uint8Array(body);
+  }
+  if (ArrayBuffer.isView(body)) {
+    const bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    return textual ? parseTextBody(raw.headers, decodeUtf8(bytes)) : bytes;
   }
   if (typeof body === "string") return parseTextBody(raw.headers, body);
   return body;
@@ -158,6 +167,14 @@ export class RestReceiver implements HyperReceiver<
     const status = response.status ?? 200;
 
     let body: unknown = response.body;
+    const streaming =
+      body != null &&
+      typeof body === "object" &&
+      ((typeof ReadableStream !== "undefined" && body instanceof ReadableStream) ||
+        Symbol.asyncIterator in body);
+    if (streaming) {
+      return { status, statusText: DEFAULT_STATUS_TEXTS[status] ?? "", headers, body };
+    }
     if (body instanceof ArrayBuffer) {
       body = new Uint8Array(body);
     } else if (ArrayBuffer.isView(body) && !(body instanceof Uint8Array)) {

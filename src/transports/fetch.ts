@@ -1,4 +1,5 @@
 import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from "node:http";
+import { dynamicImport } from "../utils/modules.js";
 import type {
   HyperTransport,
   LogLevel,
@@ -42,8 +43,39 @@ async function loadNodeHttp(): Promise<typeof import("node:http")> {
     throw new Error("[FetchTransport] listen() is only available in Node.js.");
   }
 
-  const specifier = "node:http";
-  return import(/* @vite-ignore */ specifier);
+  // Keep the specifier behind a module boundary so per-file minification cannot
+  // turn it into a browser bundler's statically resolved Node import.
+  return dynamicImport("node:http") as Promise<typeof import("node:http")>;
+}
+
+async function* readWebStream(
+  stream: ReadableStream,
+  signal: AbortSignal,
+): AsyncGenerator<Uint8Array | string> {
+  const reader = stream.getReader();
+  let done = false;
+  const cancel = () => {
+    void reader.cancel(signal.reason).catch(() => {});
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        done = true;
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    try {
+      if (!done) await reader.cancel();
+    } finally {
+      reader.releaseLock();
+    }
+  }
 }
 
 /**
@@ -66,6 +98,9 @@ export class FetchTransport implements HyperTransport {
   constructor(options: FetchTransportOptions = {}) {
     this.protocols = Object.freeze(options.protocols ?? ["rest"]);
     this.maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+    if (!Number.isSafeInteger(this.maxBodyBytes) || this.maxBodyBytes < 0) {
+      throw new RangeError("[FetchTransport] maxBodyBytes must be a non-negative safe integer.");
+    }
     this.onError = options.onError;
     this.logger = options.logger;
   }
@@ -196,7 +231,25 @@ export class FetchTransport implements HyperTransport {
 
         res.writeHead(response.status, response.statusText ?? "", outgoingHeaders);
 
-        if (response.body != null) {
+        const responseBody = response.body;
+        if (
+          responseBody != null &&
+          typeof responseBody === "object" &&
+          ((typeof ReadableStream !== "undefined" && responseBody instanceof ReadableStream) ||
+            Symbol.asyncIterator in responseBody)
+        ) {
+          const [{ Readable }, { pipeline }] = await Promise.all([
+            dynamicImport("node:stream") as Promise<Pick<typeof import("node:stream"), "Readable">>,
+            dynamicImport("node:stream/promises") as Promise<typeof import("node:stream/promises")>,
+          ]);
+          const source =
+            responseBody instanceof ReadableStream
+              ? readWebStream(responseBody, requestController.signal)
+              : (responseBody as AsyncIterable<Uint8Array | string>);
+          await pipeline(Readable.from(source, { objectMode: false }), res, {
+            signal: requestController.signal,
+          });
+        } else if (response.body != null) {
           if (response.body instanceof Uint8Array) {
             res.end(response.body);
           } else if (typeof response.body === "string") {
@@ -208,13 +261,17 @@ export class FetchTransport implements HyperTransport {
           res.end();
         }
       } catch (error) {
-        this.onError?.(error, {
-          method: req.method ?? "GET",
-          url: req.url ?? "/",
-          headers: req.headers as Record<string, string | string[]>,
-          signal: requestController.signal,
-          protocol: this.protocols[0] ?? "rest",
-        });
+        try {
+          this.onError?.(error, {
+            method: req.method ?? "GET",
+            url: req.url ?? "/",
+            headers: req.headers as Record<string, string | string[]>,
+            signal: requestController.signal,
+            protocol: this.protocols[0] ?? "rest",
+          });
+        } catch {
+          // Error hooks must not prevent the HTTP error response or cleanup.
+        }
         if (!res.headersSent) {
           res.writeHead(500);
           res.end("Internal Server Error");
@@ -228,30 +285,35 @@ export class FetchTransport implements HyperTransport {
       }
     });
 
-    let closed = false;
+    let closePromise: Promise<void> | undefined;
     const close = (): Promise<void> => {
-      if (closed) return Promise.resolve();
-      closed = true;
+      if (closePromise) return closePromise;
       signal?.removeEventListener("abort", closeOnAbort);
-      server.removeListener("error", reportRuntimeError);
-
-      if (!server.listening) return Promise.resolve();
-      return new Promise<void>((resolveClose, rejectClose) => {
+      closePromise = new Promise<void>((resolveClose, rejectClose) => {
         server.close((error) => {
-          if (error) rejectClose(error);
-          else resolveClose();
+          server.removeListener("error", reportRuntimeError);
+          if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+            rejectClose(error);
+          } else resolveClose();
         });
       });
+      return closePromise;
     };
+    let abortStartup: (() => void) | undefined;
     const closeOnAbort = () => {
-      void close();
+      if (abortStartup) abortStartup();
+      else void close().catch(reportRuntimeError);
     };
     const reportRuntimeError = (error: Error) => {
       const message = "[FetchTransport] HTTP server error";
-      if (this.logger) {
-        this.logger("error", message, error);
-      } else {
-        console.error(`${message}:`, error);
+      try {
+        if (this.logger) {
+          this.logger("error", message, error);
+        } else {
+          console.error(`${message}:`, error);
+        }
+      } catch {
+        // Diagnostics must not turn an already handled failure into a rejection.
       }
     };
 
@@ -261,17 +323,31 @@ export class FetchTransport implements HyperTransport {
     signal?.addEventListener("abort", closeOnAbort, { once: true });
 
     return new Promise<TransportServer>((resolve, reject) => {
-      const rejectStartup = (error: Error) => {
+      const rejectStartup = (error: unknown) => {
+        abortStartup = undefined;
         signal?.removeEventListener("abort", closeOnAbort);
+        server.removeListener("error", rejectStartup);
         reject(error);
+      };
+      abortStartup = () => {
+        rejectStartup(
+          signal?.reason ?? new DOMException("The operation was aborted", "AbortError"),
+        );
+        void close().catch(reportRuntimeError);
       };
 
       server.once("error", rejectStartup);
-      server.listen({ host, port }, () => {
+      server.listen({ host, port, signal }, () => {
+        if (signal?.aborted) {
+          void close().catch(reportRuntimeError);
+          return;
+        }
+        abortStartup = undefined;
         server.removeListener("error", rejectStartup);
         server.on("error", reportRuntimeError);
         resolve({ close });
       });
+      if (signal?.aborted) closeOnAbort();
     });
   }
 

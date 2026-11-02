@@ -72,6 +72,178 @@ afterEach(async () => {
 });
 
 describe("FetchTransport.listen", () => {
+  it("does not rethrow diagnostic failures from runtime errors or abort-close rejection", async () => {
+    const logger = vi.fn(() => {
+      throw new Error("logger failed");
+    });
+    const controller = new AbortController();
+    await start(new FetchTransport({ logger }), { signal: controller.signal });
+    const native = capturedServers.at(-1)! as http.Server;
+    expect(() => native.emit("error", new Error("runtime failure"))).not.toThrow();
+    const failure = new Error("close failed");
+    const originalClose = native.close;
+    vi.spyOn(native, "close").mockImplementation(function (
+      this: http.Server,
+      callback?: (error?: Error) => void,
+    ) {
+      return originalClose.call(this, () => callback?.(failure));
+    });
+    controller.abort();
+    closeServer = undefined;
+    await vi.waitFor(() =>
+      expect(logger).toHaveBeenCalledWith("error", "[FetchTransport] HTTP server error", failure),
+    );
+    expect(native.listening).toBe(false);
+  });
+
+  it("emits only own response header keys", async () => {
+    await start(new FetchTransport(), {
+      onRequest: () => ({
+        status: 200,
+        headers: Object.assign(Object.create({ "x-inherited": "secret" }), { "x-own": "yes" }),
+        body: "ok",
+      }),
+    });
+    const response = await fetch(baseUrl());
+    expect(response.headers.get("x-own")).toBe("yes");
+    expect(response.headers.has("x-inherited")).toBe(false);
+    await response.text();
+  });
+  it.each([-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid maxBodyBytes %s",
+    (maxBodyBytes) => {
+      expect(() => new FetchTransport({ maxBodyBytes })).toThrow(RangeError);
+    },
+  );
+
+  it("allows a zero-byte limit", async () => {
+    await start(new FetchTransport({ maxBodyBytes: 0 }), {
+      onRequest: () => ({ status: 200, headers: {}, body: "ok" }),
+    });
+    expect((await fetch(baseUrl())).status).toBe(200);
+    expect((await fetch(baseUrl(), { method: "POST", body: "x" })).status).toBe(413);
+  });
+
+  it("isolates a throwing onError hook", async () => {
+    const onError = vi.fn(() => {
+      throw new Error("hook failed");
+    });
+    await start(new FetchTransport({ onError }), {
+      onRequest: () => {
+        throw new Error("handler failed");
+      },
+    });
+    const response = await fetch(baseUrl());
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe("Internal Server Error");
+    expect(onError).toHaveBeenCalledOnce();
+  });
+
+  it.each(["web", "iterable"])("streams %s response chunks", async (kind) => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("hello "));
+        controller.enqueue(new TextEncoder().encode("world"));
+        controller.close();
+      },
+    });
+    const iterable = (async function* () {
+      yield "hello ";
+      yield "world";
+    })();
+    await start(new FetchTransport(), {
+      onRequest: () => ({ status: 200, headers: {}, body: kind === "web" ? stream : iterable }),
+    });
+    expect(await (await fetch(baseUrl())).text()).toBe("hello world");
+    if (kind === "web") expect(stream.locked).toBe(false);
+  });
+
+  it.each(["web", "iterable"])("cancels %s responses on client disconnect", async (kind) => {
+    const cancelled = vi.fn();
+    const stream = new ReadableStream({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(64 * 1024));
+      },
+      cancel: cancelled,
+    });
+    const iterable = (async function* () {
+      try {
+        while (true) yield new Uint8Array(64 * 1024);
+      } finally {
+        cancelled();
+      }
+    })();
+    await start(new FetchTransport(), {
+      onRequest: () => ({ status: 200, headers: {}, body: kind === "web" ? stream : iterable }),
+    });
+    const response = await fetch(baseUrl());
+    const reader = response.body!.getReader();
+    await reader.read();
+    await reader.cancel();
+    await vi.waitFor(() => expect(cancelled).toHaveBeenCalled());
+    if (kind === "web") expect(stream.locked).toBe(false);
+  });
+
+  it("waits for response drain before pulling more iterable chunks", async () => {
+    let produced = 0;
+    const blocked: http.ServerResponse[] = [];
+    const originalWrite = http.ServerResponse.prototype.write;
+    vi.spyOn(http.ServerResponse.prototype, "write").mockImplementation(function (
+      this: http.ServerResponse,
+      ...args: unknown[]
+    ) {
+      const result = Reflect.apply(originalWrite, this, args) as boolean;
+      if (blocked.length === 0) {
+        blocked.push(this);
+        return false;
+      }
+      return result;
+    } as typeof originalWrite);
+    const body = (async function* () {
+      for (let i = 0; i < 10; i++) {
+        produced++;
+        yield "chunk";
+      }
+    })();
+    await start(new FetchTransport(), {
+      onRequest: () => ({ status: 200, headers: {}, body }),
+    });
+    const pending = fetch(baseUrl()).then((response) => response.text());
+    await vi.waitFor(() => expect(blocked).toHaveLength(1));
+    expect(produced).toBeLessThan(10);
+    const pausedCount = produced;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(produced).toBe(pausedCount);
+    blocked[0]!.emit("drain");
+    expect(await pending).toBe("chunk".repeat(10));
+  });
+
+  it("rejects an abort while startup is pending without leaving a listener", async () => {
+    const controller = new AbortController();
+    type ListenTarget = { listen: (...args: unknown[]) => Server };
+    const target = http.Server.prototype as unknown as ListenTarget;
+    const original = target.listen;
+    const native: Server[] = [];
+    vi.spyOn(target, "listen").mockImplementation(function (this: Server, ...args) {
+      native.push(this);
+      const result = Reflect.apply(original, this, args) as Server;
+      controller.abort(new Error("startup cancelled"));
+      return result;
+    });
+    await expect(
+      new FetchTransport().listen({ host: "127.0.0.1", port: 0, signal: controller.signal }),
+    ).rejects.toThrow("startup cancelled");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(native[0]!.listening).toBe(false);
+  });
+
+  it("shares the pending close promise between concurrent callers", async () => {
+    const server = await start(new FetchTransport(), {});
+    const first = server.close();
+    const second = server.close();
+    expect(second).toBe(first);
+    await first;
+  });
   it("serves HTTP requests and preserves the raw transport envelope", async () => {
     const onRequest = vi.fn(async (request: TransportRequest) => {
       expect(request).toMatchObject({

@@ -203,7 +203,9 @@ describe("HyperCore.listen (server role)", () => {
     const listen = vi.spyOn(FetchTransport.prototype, "listen").mockResolvedValue(serverHandle);
     const core = new HyperCore({}, clientOnly as HyperTransport);
 
-    await expect(core.listen({ protocol: "rest" })).resolves.toBe(serverHandle);
+    await expect(core.listen({ protocol: "rest" })).resolves.toEqual({
+      close: expect.any(Function),
+    });
     expect(listen).toHaveBeenCalledOnce();
 
     await core.send({ protocol: "rest", input: { method: "GET", url: "/client" } });

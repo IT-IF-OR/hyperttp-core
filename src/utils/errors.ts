@@ -27,13 +27,13 @@ export class HyperClientError extends Error {
   }
 
   /**
-   * @ru Проверяет, является ли ошибка экземпляром HttpClientError (безопасно для разрозненных бандлов).
-   * @en Checks if an error is an HttpClientError instance (bundle boundary safe).
+   * @ru Проверяет, является ли ошибка экземпляром HyperClientError (безопасно для разрозненных бандлов).
+   * @en Checks if an error is a HyperClientError instance (bundle boundary safe).
    */
   public static isHyperClientError(err: unknown): err is HyperClientError {
     return (
       err instanceof HyperClientError ||
-      (err instanceof Error && (err as any).code === "HYPER_ERROR")
+      (err instanceof Error && "code" in err && err.code === "HYPER_ERROR")
     );
   }
 }
@@ -60,6 +60,9 @@ export class TimeoutError extends HyperClientError {
    * @en Checks if an error is a TimeoutError instance.
    */
   public static isTimeoutError(err: unknown): err is TimeoutError {
-    return err instanceof TimeoutError || (err instanceof Error && (err as any).code === "TIMEOUT");
+    return (
+      err instanceof TimeoutError ||
+      (err instanceof Error && "code" in err && err.code === "TIMEOUT")
+    );
   }
 }

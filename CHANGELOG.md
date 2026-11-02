@@ -1,5 +1,40 @@
 # Changelog
 
+## [3.0.0] — 2026-11-03
+
+### Added
+
+- Centralized lifecycle/plugin type contracts in `@hyperttp/types`, removing duplicate Core module augmentations while preserving type-only re-exports.
+
+- Added separate blocking server request/response/error/settled plugin hooks to the listen lifecycle, without implicitly applying client plugins.
+
+- Added coordinated built-package smoke checks for Node, Bun and Deno, a strict built declaration consumer and a release checklist.
+
+- Added optional request settlement callbacks and finalized-response reuse for exactly-once resource cleanup and final inflight outcomes.
+- Added per-core `pluginFactories` and explicit `shared: true` stateless plugins (without setup).
+
+### Fixed
+
+- Kept Node server imports behind the dynamic-loader module boundary so minified dist remains browser-bundleable without Node externals or polyfills. Added a per-file-minification regression and Chromium runner.
+
+- Preserved explicit protocol registration when an earlier lazy import completes, and rejected late resolution after shutdown.
+- Routed failures in recovered-response hooks through error cleanup without repeating recovery or response processing.
+
+- Continued error-hook cleanup after recovery or hook failures and preserved each plugin's request identity across request replacements.
+- Rejected new work after shutdown starts; shutdown now waits for pending server startup and server handles share an idempotent close promise.
+- Isolated automatic transport caches by configuration and role; custom transports no longer leak into default clients.
+- Deduplicated lazy protocol loads and prevented stale resolutions from repopulating reset caches.
+- Removed obsolete flat methods when replacing senders and aligned `HyperCore.send()` overloads with `IHyperCore`.
+- Made REST request encoding browser-safe; fixed timeout cleanup, streaming cancellation, binary request preservation and server streaming with backpressure.
+- Hardened query dictionaries, incoming body-limit configuration and diagnostic callbacks.
+
+### Changed
+
+- Core initialization rejects network operations from setup; graceful destroy waits for accepted client calls including settlement.
+- Protocol replacement preserves user overrides of previously generated flat methods.
+- Duplicate registration of the same plugin instance on one core is idempotent; duplicate names and cross-core instance reuse are rejected before setup. Supply fresh plugin instances through `plugins` when using `extend()` or `create()`.
+- Streaming bodies with timeout/abort handling may be returned through lifecycle wrappers rather than preserving their original stream identity.
+
 ## [2.0.5] — 2026-10-26
 
 ### Added

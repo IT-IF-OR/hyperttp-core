@@ -20,7 +20,7 @@ HTTP-фреймворк «со всем из коробки». Оно связы
   принимать через `HyperReceiver` или реализовывать обе роли как `HyperProtocol`.
 - **Транспорты** отвечают за физический I/O. Текущий контракт транспорта выполняет исходящие
   запросы и может дополнительно слушать входящие запросы.
-- **Плагины** добавляют политики клиентских запросов и сквозное поведение, не расширяя само ядро.
+- **Плагины** добавляют клиентские политики и явные серверные lifecycle hooks, не расширяя ядро.
 
 Ядро отвечает за диспетчеризацию, lifecycle, выполнение плагинов и управление ресурсами. REST входит
 в базовую поставку; дополнительные протоколы, оптимизированные транспорты и высокоуровневое поведение
@@ -55,7 +55,8 @@ observability и другие политики запросов должны б�
 - Клиентский lifecycle: `prepare → send → parse`.
 - Серверный lifecycle: `receive → handle → respond`.
 - Разрешение транспортов по протоколу и координированное владение ими.
-- Блокирующие и фоновые hooks клиентских плагинов.
+- Блокирующие и фоновые клиентские hooks, отдельные блокирующие серверные hooks.
+- Стабильный request context и final settlement для освобождения ресурсов.
 - Выбор транспорта по runtime с browser-safe fetch fallback.
 - Строгие TypeScript-контракты и module augmentation для типизированных namespace протоколов.
 - Отсутствие встроенных runtime-зависимостей.
@@ -66,10 +67,14 @@ observability и другие политики запросов должны б�
 npm install @hyperttp/core @hyperttp/types
 ```
 
-Совместимые оптимизированные транспорты устанавливаются отдельно. Убедитесь, что выбранная версия
-транспорта объявляет совместимость с `@hyperttp/types@^0.4.2`: старые версии транспортов рассчитаны
-на несовместимые контракты типов и не могут быть установлены вместе с core 2.0. Без опционального
-пакета транспорта ядро использует встроенный `FetchTransport`.
+Ядру требуется `@hyperttp/types@^0.5.0`. Общие контракты lifecycle и плагинов находятся
+в этом пакете: `CorePluginFactory`, `RequestOutcome`, `ServerPluginContext`,
+`ServerRequestOutcome`. Для идентификаторов протокола используйте `HyperProtocolName`;
+`SenderProtocol` сохранён как deprecated alias для совместимости.
+
+Оптимизированные транспорты опциональны; выбирайте версии, совместимые с текущими контрактами.
+Встроенный `FetchTransport` по умолчанию поддерживает REST, а не произвольные протоколы.
+Пакеты протоколов и транспортов решают разные задачи.
 
 ## Быстрый старт клиента
 
@@ -134,6 +139,10 @@ await core.destroy();
 контракт транспорта всегда предоставляет клиентский `execute()` и может дополнительно предоставлять
 серверный `listen()`.
 
+Для закрытия одного listener используйте `await server.close()`, всех — `await core.destroy()`.
+Маршруты `server.rest.get()` и типизированные services относятся к высокоуровневому пакету
+`hyperttp`, а не к Core.
+
 ## Протоколы
 
 REST — единственный протокол, реализованный внутри ядра. Внешние модули протоколов загружаются
@@ -148,9 +157,17 @@ REST — единственный протокол, реализованный �
 | WebSocket | `@hyperttp/protocol-websocket` | `core.ws` / `core.websocket` |
 | SSE       | `@hyperttp/protocol-sse`       | `core.sse`                   |
 | MQTT      | `@hyperttp/protocol-mqtt`      | `core.mqtt`                  |
+| WebRTC    | `@hyperttp/protocol-webrtc`    | `core.webrtc`                |
 
 Если опциональный пакет протокола не установлен, разрешение завершается понятной подсказкой по
 установке, а не молча выбирает другой протокол.
+
+Явно зарегистрированный sender сразу предоставляет namespace, в том числе при регистрации
+после создания ядра. Receiver-only модуль доступен через `listen()`, но не создаёт клиентские методы.
+`registerProtocol()` заменяет модуль целиком, включая удаление отсутствующей роли.
+`registerSender()` / `registerReceiver()` сохраняют противоположную роль. Устаревшие generated
+flat methods удаляются, пользовательские переопределения сохраняются. Коллизии с API ядра
+и prototype-sensitive имена отклоняются.
 
 ### Роли протокола
 
@@ -180,6 +197,14 @@ declare module "@hyperttp/types" {
 
   interface HyperProtocols {
     "my-protocol": MyProtocolMethods;
+  }
+
+  interface ProtocolServerRequestMap {
+    "my-protocol": MyServerRequest;
+  }
+
+  interface ProtocolServerResponseMap {
+    "my-protocol": MyServerResponse;
   }
 }
 ```
@@ -211,6 +236,17 @@ interface HyperTransport {
 | Bun            | `@hyperttp/transport-bun`    | встроенный `FetchTransport` |
 | Deno           | `@hyperttp/transport-deno`   | встроенный `FetchTransport` |
 | Browser / edge | custom transport             | встроенный `FetchTransport` |
+
+Для WebRTC, WebSocket и MQTT сначала проверяются специализированные пакеты
+`@hyperttp/transport-webrtc`, `@hyperttp/transport-websocket`, `@hyperttp/transport-mqtt`.
+У каждого кандидата проверяется поддержка протокола: выбор по runtime не означает
+поддержку любого протокола.
+
+Client/listen caches разделены; автоматические транспорты изолированы по identity конфигурации.
+Custom transport не попадает в default cache независимых ядер. Если REST-транспорт клиента
+не имеет `listen()`, сервер использует встроенный fallback, не заменяя клиентский транспорт.
+Серверный fallback динамически загружает `node:http`: browser-safe импорт не означает
+возможность открыть сервер в браузере.
 
 Транспорт можно передать явно:
 
@@ -253,6 +289,33 @@ Hooks:
 - `enabled(config)` управляет регистрацией.
 - `setup(context)` инициализирует плагин.
 
+### Изоляция и завершение запроса
+
+Stateful plugin instance принадлежит одному Core. Повторная регистрация того же экземпляра
+идемпотентна; другое значение с тем же именем и неявное использование между Core отклоняются.
+Используйте `pluginFactories: [() => withQueue(options), () => withInflight()]`: фабрики создают
+новые экземпляры для конструктора, `extend()` и `create()`. При наследовании явного `plugins`
+заменяйте stateful instances свежими или передавайте `plugins: []`.
+Stateless-плагин может объявить `shared: true`, но не должен иметь `setup()` или разделять
+состояние запросов/ядер через замыкания.
+
+Фазы выполняются в порядке START → PREPARE → CONTROL → FORMAT → NETWORK → DATA;
+без `phase` используется START. Response/error hooks сохраняют прямой порядок фаз.
+Каждый получает request envelope, который видел его собственный `onRequest`, и стабильный
+`RequestContext`. Все error hooks вызываются, даже если уже получен recovery response или
+диагностический hook выбросил исключение. Recovery проходит response hooks, кроме случая,
+когда ошибка возникла уже в response processing. Повторного цикла recovery нет.
+
+Обязательный cleanup регистрируется через `requestContext.onSettled(callback)`, а не через
+response/error hooks. Callbacks выполняются ровно один раз после blocking response/recovery
+с итогом `{ ok: true, response }` или `{ ok: false, error }`. Ошибка callback диагностическая
+и не мешает остальным; регистрировать новые callbacks после начала settlement нельзя.
+Обновлённый queue освобождает slot на этом этапе, inflight завершает followers итогом primary.
+`acceptFinalResponse(response)` позволяет follower не применять response transformations повторно.
+
+Background hooks не ожидаются при settlement. Снимки response/headers поверхностные:
+вложенные данные, streams и context остаются общими, их нельзя мутировать.
+
 Примеры функциональности для плагинов:
 
 - retries и circuit breakers;
@@ -262,40 +325,109 @@ Hooks:
 - rate limiting, concurrency control и scheduling;
 - валидация схем и прикладные политики.
 
+## Серверные плагины
+
+Клиентские hooks не выполняются для входящих `listen()`-запросов. Серверные hooks
+регистрируются отдельно через те же `core.use()` / `pluginFactories`:
+
+```ts
+core.use({
+  name: "server-headers",
+  onServerResponse(response) {
+    return {
+      ...response,
+      headers: { ...response.headers, "x-powered-by": "hyperttp" },
+    };
+  },
+});
+
+await core.listen({
+  protocol: "rest",
+  port: 3000,
+  handler: () => ({ body: { ok: true } }),
+});
+```
+
+```text
+onServerRequest → receiver.receive → handler/receiver.handle
+→ receiver.respond → onServerResponse → transport
+```
+
+- `onServerRequest` может заменить сырой `TransportRequest` до декодирования.
+- `onServerResponse` может заменить сериализованный `TransportResponse` до передачи транспорту.
+  При изменении только заголовков сохраняйте body/stream.
+- `onServerError`: вызываются все hooks; первый возвращённый сырой ответ восстанавливает
+  выполнение. Recovery проходит outgoing hooks, если они ещё не завершились ошибкой.
+  Ошибка при обработке recovery передаётся дальше без нового recovery-цикла.
+- `onServerSettled` выполняется ровно один раз с окончательным результатом подготовки ответа;
+  ошибки диагностические и не прерывают остальные cleanup hooks.
+
+Все серверные hooks блокирующие, даже при клиентском `mode: "background"`. Используется
+один snapshot плагинов на запрос, прямой порядок фаз и стабильный context с listen-bound
+`protocol`, signal, state и metadata. Settlement означает готовность ответа к передаче
+транспорту, **не** окончание stream или физическую доставку. Ошибки записи транспорта
+находятся за этой границей. Для серверного cleanup используйте `onServerSettled`,
+а не клиентский `onSettled`.
+
+Outbound auth/cache/retry не превращаются автоматически в server authorization, server cache
+или повторную отправку ответа. Плагин должен явно реализовать серверные hooks.
+
 ## Встроенный REST-протокол
 
 REST предоставляет клиентскую и серверную роли через `RestProtocol`.
 
 ```ts
-const getResponse = await core.rest.get("/users", {
+const getResponse = await core.rest.get("https://example.com/users", {
   query: { page: 1, tag: ["a", "b"] },
   headers: { accept: "application/json" },
   timeout: 5_000,
 });
 
-const postResponse = await core.rest.post("/users", {
+const postResponse = await core.rest.post("https://example.com/users", {
   name: "Ada",
 });
 
-const streamResponse = await core.rest.stream("/events");
+const streamResponse = await core.rest.stream("https://example.com/events");
 ```
 
 REST поддерживает:
 
 - сериализацию query с повторяющимися параметрами массивов;
-- нормализацию заголовков;
+- нормализацию `Headers`, records и tuple arrays;
 - JSON-сериализацию plain object и array request body;
 - обработку JSON, text и binary response;
-- timeout и пользовательский abort;
+- UTF-8 кодирование без обязательного глобального `Buffer`;
+- timeout и пользовательский abort до окончания чтения response stream;
 - небуферизованный stream mode;
+- сохранение binary request bodies и серверные streams с backpressure;
+- prototype-safe query dictionaries с повторяющимися ключами;
 - декодирование запросов и сериализацию ответов для серверной роли.
+
+Встроенный сервер по умолчанию ограничивает тело запроса 10 MiB. `maxBodyBytes` —
+неотрицательное безопасное целое; 0 допускает только пустое тело. Custom transports
+отвечают за свои лимиты. REST не добавляет прикладную валидацию, авторизацию или политику
+credentials при redirect: redirect и работа с credentials зависят от выбранного транспорта.
+
+Core не добавляет клиентский base URL; со встроенным fetch-транспортом используйте абсолютные URL.
 
 Публичные REST-типы доступны из `@hyperttp/core/rest`.
 
 ## Lifecycle
 
+Состояния Core: initializing → running → destroying → destroyed. В `setup()` можно
+регистрировать протоколы/плагины, но нельзя запускать send/listen или получать транспорт.
+После начала shutdown новые операции отклоняются, включая short-circuit/cache-hit пути.
+Graceful destroy ожидает принятые клиентские вызовы вместе с settlement, pending server startup
+и закрытие серверов. Запрос, приостановленный до dispatch, может отклониться на следующей
+проверке состояния. Принудительный destroy делегирует отмену транспорту и не ждёт client calls;
+некооперативный транспорт может оставить запрос незавершённым.
+
+Streams могут жить дольше send promise; signal/deadline действуют до completion/cancel/error.
+Не ожидайте graceful `destroy()` внутри активного request hook: shutdown ждёт сам этот запрос.
+Дренирование серверных запросов определяется `TransportServer.close()`.
+
 ```ts
-const child = core.extend({ verbose: true }); // разделяет transport leases
+const child = core.extend({ verbose: true }); // разделяет существующие и pending client transport leases
 const isolated = core.create({}); // независимый lifecycle транспорта
 
 await child.destroy();
@@ -314,7 +446,7 @@ await core.destroy();
 import { HyperClientError, TimeoutError } from "@hyperttp/core";
 
 try {
-  await core.rest.get("/slow", { timeout: 1_000 });
+  await core.rest.get("https://example.com/slow", { timeout: 1_000 });
 } catch (error) {
   if (TimeoutError.isTimeoutError(error)) {
     console.error("Истёк таймаут запроса");
@@ -348,7 +480,7 @@ try {
 ## Разработка
 
 ```bash
-npm install
+bun install --frozen-lockfile
 npm run format:check
 npm run lint
 npm run typecheck

@@ -48,6 +48,8 @@ export const KNOWN_PROTOCOLS: readonly SenderProtocol[] = Object.freeze([
 ]);
 
 const protocolCache = new Map<string, AnyHyperProtocol>();
+const pendingProtocols = new Map<string, Promise<AnyHyperProtocol>>();
+let cacheGeneration = 0;
 
 /**
  * @ru Разрешает модуль протокола. Встроенный rest возвращается статически,
@@ -69,6 +71,27 @@ export async function resolveProtocol<P extends SenderProtocol>(
     return RestProtocol as AnyHyperProtocol<P>;
   }
 
+  const pending = pendingProtocols.get(protocol);
+  if (pending) return (await pending) as AnyHyperProtocol<P>;
+
+  const generation = cacheGeneration;
+  const resolution = loadProtocol(protocol, options)
+    .then((instance) => {
+      if (generation === cacheGeneration) protocolCache.set(protocol, instance);
+      return instance;
+    })
+    .finally(() => {
+      // A pre-reset resolution must not remove a newer pending load.
+      if (pendingProtocols.get(protocol) === resolution) pendingProtocols.delete(protocol);
+    });
+  pendingProtocols.set(protocol, resolution);
+  return (await resolution) as AnyHyperProtocol<P>;
+}
+
+async function loadProtocol(
+  protocol: SenderProtocol,
+  options?: { [key: string]: unknown },
+): Promise<AnyHyperProtocol> {
   for (let i = 0; i < PROTOCOL_DEFS.length; i++) {
     const def = PROTOCOL_DEFS[i]!;
     if (def.protocol !== protocol) continue;
@@ -84,8 +107,7 @@ export async function resolveProtocol<P extends SenderProtocol>(
 
       if (!instance || typeof instance.protocol !== "string") continue;
 
-      protocolCache.set(protocol, instance);
-      return instance as AnyHyperProtocol<P>;
+      return instance;
     } catch (err) {
       if (!isModuleNotFoundError(err)) throw err;
     }
@@ -134,5 +156,7 @@ export async function resolveReceiver<P extends SenderProtocol>(
  * modules already imported by the runtime.
  */
 export function resetCachedProtocols(): void {
+  cacheGeneration++;
   protocolCache.clear();
+  pendingProtocols.clear();
 }

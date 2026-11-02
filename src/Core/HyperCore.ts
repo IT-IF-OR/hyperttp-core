@@ -1,5 +1,8 @@
 import type {
   AnyHyperSender,
+  AnyHyperProtocol,
+  AnyHyperReceiver,
+  InferProtocolInput,
   HyperClientOptions,
   HyperPlugin,
   HyperProtocol,
@@ -12,6 +15,8 @@ import type {
   PluginContext,
   ProtocolRegistry,
   RequestContext,
+  RequestOutcome,
+  ServerRequestOutcome,
   SenderProtocol,
   SendRequest,
   ServerRequestContext,
@@ -63,6 +68,7 @@ function createRequestId(): string {
  * share one transport, closing it only after the last reference is released.
  */
 const transportRefs = new WeakMap<HyperTransport, number>();
+const pluginOwners = new WeakMap<HyperPlugin, HyperCore>();
 
 function retainTransport(transport: HyperTransport): void {
   transportRefs.set(transport, (transportRefs.get(transport) ?? 0) + 1);
@@ -94,6 +100,38 @@ class DefaultRequestContext implements RequestContext {
   public readonly signal?: AbortSignal;
   private requestMeta?: Record<string, unknown>;
   private requestState?: Record<string, unknown>;
+  private settlementCallbacks: ((outcome: RequestOutcome) => void | Promise<void>)[] = [];
+  private finalized = false;
+  private acceptedResponse?: UniversalResponse;
+
+  public onSettled(callback: (outcome: RequestOutcome) => void | Promise<void>): void {
+    if (this.finalized) throw new Error("[HyperCore] Request settlement has already started.");
+    this.settlementCallbacks.push(callback);
+  }
+
+  public acceptFinalResponse<T>(response: UniversalResponse<T>): UniversalResponse<T> {
+    if (this.finalized) throw new Error("[HyperCore] Request has already settled.");
+    this.acceptedResponse = response;
+    return response;
+  }
+
+  public isFinalResponse(response: UniversalResponse): boolean {
+    return this.acceptedResponse === response;
+  }
+
+  public async settle(outcome: RequestOutcome, report: (error: unknown) => void): Promise<void> {
+    if (this.finalized) return;
+    this.finalized = true;
+    const callbacks = this.settlementCallbacks;
+    this.settlementCallbacks = [];
+    for (const callback of callbacks) {
+      try {
+        await callback(outcome);
+      } catch (error) {
+        report(error);
+      }
+    }
+  }
 
   constructor(signal?: AbortSignal) {
     this.signal = signal;
@@ -116,7 +154,7 @@ class DefaultRequestContext implements RequestContext {
   }
 }
 
-function createRequestContext(req: SendRequest<unknown, string>): RequestContext {
+function createRequestContext(req: SendRequest<unknown, string>): DefaultRequestContext {
   return new DefaultRequestContext(req.signal);
 }
 
@@ -153,11 +191,9 @@ function isUniversalResponse(value: unknown): value is UniversalResponse {
  * @en Internal protocol registry: stores unified modules (Sender + Receiver).
  */
 class DefaultProtocolRegistry implements ProtocolRegistry {
-  private readonly protocols = new Map<SenderProtocol, HyperProtocol>();
+  private readonly protocols = new Map<SenderProtocol, AnyHyperProtocol>();
 
-  public register<P extends SenderProtocol>(
-    protocol: HyperProtocol<unknown, unknown, unknown, unknown, P>,
-  ): void {
+  public register<P extends SenderProtocol>(protocol: AnyHyperProtocol<P>): void {
     this.protocols.set(protocol.protocol, protocol);
   }
 
@@ -198,6 +234,9 @@ export class HyperCore implements IHyperCore {
   private readonly pluginCtx: PluginContext;
   private plugins: HyperPlugin[] = [];
   private readonly servers = new Set<TransportServer>();
+  private readonly pendingListeners = new Set<Promise<TransportServer>>();
+  private readonly flatMethodOwners = new Map<string, string>();
+  private readonly flatMethodValues = new Map<string, unknown>();
   private readonly protocolNamespaces = new Set<string>();
   private readonly generatedFlatMethods = new Set<string>();
   private readonly transportPromises = new Map<SenderProtocol, Promise<HyperTransport>>();
@@ -207,7 +246,12 @@ export class HyperCore implements IHyperCore {
   private readonly retainedTransports = new Set<HyperTransport>();
   private readonly fixedTransport: HyperTransport | null;
   private destroyPromise: Promise<void> | null = null;
-  private isDestroyed = false;
+  private state: "initializing" | "running" | "destroying" | "destroyed" = "initializing";
+  private readonly activeRequests = new Set<Promise<void>>();
+
+  private get isDestroyed(): boolean {
+    return this.state === "destroying" || this.state === "destroyed";
+  }
 
   constructor(
     config: Partial<HyperClientOptions> = {},
@@ -223,21 +267,15 @@ export class HyperCore implements IHyperCore {
       },
     };
     this.fixedTransport = transport ?? null;
-    if (transport) {
-      retainTransport(transport);
-      this.retainedTransports.add(transport);
-    }
-    if (sharedTransportPromises) {
-      for (const [protocol, sharedPromise] of sharedTransportPromises) {
-        this.transportPromises.set(
-          protocol,
-          sharedPromise.then((sharedTransport) =>
-            this.retainResolvedTransport(protocol, sharedTransport),
-          ),
+    this.pluginCtx = { config: this.config, core: this };
+
+    for (const plugin of this.config.plugins ?? []) {
+      if (typeof plugin !== "string" && !plugin.shared && pluginOwners.has(plugin)) {
+        throw new HyperClientError(
+          "[HyperCore] Plugin instances cannot be shared across cores. Supply fresh plugins when extending or creating a core.",
         );
       }
     }
-    this.pluginCtx = { config: this.config, core: this };
 
     const protocols = this.config.protocols;
     if (protocols) {
@@ -274,8 +312,22 @@ export class HyperCore implements IHyperCore {
             `[HyperCore] Plugin module "${plugin}" cannot be loaded by the synchronous constructor. Import it and pass the plugin instance instead.`,
           );
         }
-        this.use(plugin);
+        try {
+          this.use(plugin);
+        } catch (error) {
+          for (const registered of this.plugins) pluginOwners.delete(registered);
+          throw error;
+        }
       }
+    }
+
+    try {
+      for (const factory of this.config.pluginFactories ?? []) this.use(factory());
+    } catch (error) {
+      for (const registered of this.plugins) {
+        if (pluginOwners.get(registered) === this) pluginOwners.delete(registered);
+      }
+      throw error;
     }
 
     const namespaces = this as unknown as Record<string, unknown>;
@@ -286,6 +338,21 @@ export class HyperCore implements IHyperCore {
         this.protocolNamespaces.add(protocol);
       }
     }
+    if (transport && !this.retainedTransports.has(transport)) {
+      retainTransport(transport);
+      this.retainedTransports.add(transport);
+    }
+    if (sharedTransportPromises) {
+      for (const [protocol, sharedPromise] of sharedTransportPromises) {
+        this.transportPromises.set(
+          protocol,
+          sharedPromise.then((sharedTransport) =>
+            this.retainResolvedTransport(protocol, sharedTransport),
+          ),
+        );
+      }
+    }
+    this.state = "running";
   }
 
   /**
@@ -324,6 +391,7 @@ export class HyperCore implements IHyperCore {
    * @returns Transport constructor name.
    */
   public async getTransportName(): Promise<string> {
+    this.assertRunning();
     const t = await this.acquireTransport();
     return t.constructor.name;
   }
@@ -337,11 +405,7 @@ export class HyperCore implements IHyperCore {
    * @returns Sender constructor name.
    */
   public async getSenderName(protocol: SenderProtocol = "rest"): Promise<string> {
-    let resolved = this.registry.get(protocol);
-    if (!resolved) {
-      resolved = await resolveProtocol(protocol);
-      this.registerProtocol(resolved);
-    }
+    const resolved = await this.resolveRegisteredProtocol(protocol);
     const sender = resolved.sender;
     if (!sender) {
       throw new HyperClientError(`[HyperCore] Protocol "${protocol}" has no sender (client role).`);
@@ -358,11 +422,7 @@ export class HyperCore implements IHyperCore {
    * @returns Receiver constructor name.
    */
   public async getReceiverName(protocol: SenderProtocol = "rest"): Promise<string> {
-    let resolved = this.registry.get(protocol);
-    if (!resolved) {
-      resolved = await resolveProtocol(protocol);
-      this.registerProtocol(resolved);
-    }
+    const resolved = await this.resolveRegisteredProtocol(protocol);
     const receiver = resolved.receiver;
     if (!receiver) {
       throw new HyperClientError(
@@ -383,11 +443,7 @@ export class HyperCore implements IHyperCore {
    * @returns The protocol module display name.
    */
   public async getProtocolName(protocol: SenderProtocol = "rest"): Promise<string> {
-    let resolved = this.registry.get(protocol);
-    if (!resolved) {
-      resolved = await resolveProtocol(protocol);
-      this.registerProtocol(resolved);
-    }
+    const resolved = await this.resolveRegisteredProtocol(protocol);
     if (resolved.name) return resolved.name;
     const ctor = resolved.constructor;
     return ctor && ctor.name && ctor.name !== "Object" ? ctor.name : String(resolved.protocol);
@@ -401,9 +457,8 @@ export class HyperCore implements IHyperCore {
    * @param protocol - The protocol module to register.
    * @returns This instance for chaining.
    */
-  public registerProtocol<P extends SenderProtocol>(
-    protocol: HyperProtocol<unknown, unknown, unknown, unknown, P>,
-  ): this {
+  public registerProtocol<P extends SenderProtocol>(protocol: AnyHyperProtocol<P>): this {
+    this.assertActive();
     const protocolName = String(protocol.protocol);
     const namespaces = this as unknown as Record<string, unknown>;
     const isReserved =
@@ -419,6 +474,22 @@ export class HyperCore implements IHyperCore {
       );
     }
 
+    for (const [name, owner] of this.flatMethodOwners) {
+      if (owner === protocolName) {
+        if (
+          Object.getOwnPropertyDescriptor(this, name)?.value === this.flatMethodValues.get(name)
+        ) {
+          delete namespaces[name];
+        }
+        this.flatMethodValues.delete(name);
+        this.flatMethodOwners.delete(name);
+        this.generatedFlatMethods.delete(name);
+      }
+    }
+    if (this.protocolNamespaces.has(protocolName)) {
+      delete namespaces[protocolName];
+      this.protocolNamespaces.delete(protocolName);
+    }
     this.registry.register(protocol);
 
     const methods = protocol.sender?.methods;
@@ -434,11 +505,18 @@ export class HyperCore implements IHyperCore {
         const boundMethod = (...args: unknown[]) => method.apply(methods, [this, ...args]);
         namespace[name] = boundMethod;
 
-        if (this.generatedFlatMethods.has(name)) {
+        const stillGenerated =
+          this.generatedFlatMethods.has(name) &&
+          Object.getOwnPropertyDescriptor(this, name)?.value === this.flatMethodValues.get(name);
+        if (stillGenerated) {
           namespaces[name] = boundMethod;
+          this.flatMethodOwners.set(name, protocolName);
+          this.flatMethodValues.set(name, boundMethod);
         } else if (!(name in HyperCore.prototype) && !(name in this)) {
           namespaces[name] = boundMethod;
           this.generatedFlatMethods.add(name);
+          this.flatMethodOwners.set(name, protocolName);
+          this.flatMethodValues.set(name, boundMethod);
         }
       }
 
@@ -474,9 +552,7 @@ export class HyperCore implements IHyperCore {
    * @param receiver - The protocol receiver to register.
    * @returns This instance for chaining.
    */
-  public registerReceiver<P extends SenderProtocol>(
-    receiver: HyperReceiver<unknown, unknown, unknown, unknown, P>,
-  ): this {
+  public registerReceiver<P extends SenderProtocol>(receiver: AnyHyperReceiver<P>): this {
     const existing = this.registry.get(receiver.protocol);
     return this.registerProtocol({
       protocol: receiver.protocol,
@@ -518,11 +594,7 @@ export class HyperCore implements IHyperCore {
     name: string,
     args: unknown[],
   ): Promise<unknown> {
-    let resolved = this.registry.get(protocol);
-    if (!resolved) {
-      resolved = await resolveProtocol(protocol);
-      this.registerProtocol(resolved);
-    }
+    const resolved = await this.resolveRegisteredProtocol(protocol);
 
     const sender = resolved.sender;
     if (!sender) {
@@ -532,7 +604,7 @@ export class HyperCore implements IHyperCore {
     const methods = sender.methods as
       | Record<string, (...callArgs: unknown[]) => unknown>
       | undefined;
-    const method = methods?.[name];
+    const method = methods && Object.hasOwn(methods, name) ? methods[name] : undefined;
     if (typeof method !== "function") {
       throw new TypeError(`[HyperCore] Protocol "${protocol}" has no method "${name}".`);
     }
@@ -547,12 +619,47 @@ export class HyperCore implements IHyperCore {
    * @param req - The universal request envelope.
    * @returns A promise resolving to the normalized universal response.
    */
+  public send<TOutput = unknown, P extends SenderProtocol = SenderProtocol>(
+    req: SendRequest<InferProtocolInput<P>, P>,
+  ): Promise<UniversalResponse<TOutput>>;
+  public send<TInput = unknown, TOutput = unknown, P extends SenderProtocol = SenderProtocol>(
+    req: SendRequest<TInput, P>,
+  ): Promise<UniversalResponse<TOutput>>;
   public async send<TInput = unknown, TOutput = unknown, P extends string = string>(
     req: SendRequest<TInput, P>,
   ): Promise<UniversalResponse<TOutput>> {
+    this.assertRunning();
+    let complete!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    this.activeRequests.add(completion);
     const ctx = createRequestContext(req as SendRequest<unknown, string>);
+    try {
+      const response = await this.executeRequest<TInput, TOutput, P>(req, ctx);
+      await ctx.settle({ ok: true, response }, (error) =>
+        this.log("error", "[HyperCore] Settlement callback failed", error),
+      );
+      return response;
+    } catch (error) {
+      await ctx.settle({ ok: false, error }, (diagnostic) =>
+        this.log("error", "[HyperCore] Settlement callback failed", diagnostic),
+      );
+      throw error;
+    } finally {
+      complete();
+      this.activeRequests.delete(completion);
+    }
+  }
+
+  private async executeRequest<TInput, TOutput, P extends string>(
+    req: SendRequest<TInput, P>,
+    ctx: DefaultRequestContext,
+  ): Promise<UniversalResponse<TOutput>> {
     const plugins = this.plugins;
     let currentReq = req as SendRequest<any, any>;
+    const hookRequests = new Map<HyperPlugin, SendRequest<any, any>>();
+    let responseHooksStarted = false;
 
     if (plugins.length === 0) {
       const sender = this.registry.get(req.protocol)?.sender;
@@ -568,6 +675,7 @@ export class HyperCore implements IHyperCore {
         const plugin = plugins[i]!;
         if (typeof plugin.onRequest !== "function") continue;
 
+        hookRequests.set(plugin, currentReq);
         const result = await plugin.onRequest(currentReq, this.pluginCtx, ctx);
         if (result == null) continue;
 
@@ -585,29 +693,88 @@ export class HyperCore implements IHyperCore {
         response = await this.runSender<unknown, TOutput>(sender, currentReq, ctx);
       }
 
-      return await this.runResponseHooks(response, currentReq, ctx, plugins);
+      if (ctx.isFinalResponse(response)) return response;
+      responseHooksStarted = true;
+      return await this.runResponseHooks(response, currentReq, ctx, plugins, hookRequests);
     } catch (err) {
-      for (let i = 0; i < plugins.length; i++) {
-        const plugin = plugins[i]!;
+      let recovery: UniversalResponse<TOutput> | undefined;
+      for (const plugin of plugins) {
         if (typeof plugin.onError !== "function") continue;
-
-        const recovered = await plugin.onError(err, currentReq, this.pluginCtx, ctx);
-        if (recovered != null && isUniversalResponse(recovered)) {
-          return recovered as UniversalResponse<TOutput>;
+        try {
+          const recovered = await plugin.onError(
+            err,
+            hookRequests.get(plugin) ?? currentReq,
+            this.pluginCtx,
+            ctx,
+          );
+          if (!recovery && recovered != null && isUniversalResponse(recovered)) {
+            recovery = recovered as UniversalResponse<TOutput>;
+          }
+        } catch (hookError) {
+          this.log("error", "[HyperCore] Error hook failed", hookError);
+        }
+      }
+      if (recovery) {
+        // A response-hook failure already triggered cleanup; do not repeat those hooks.
+        if (responseHooksStarted) return recovery;
+        try {
+          return await this.runResponseHooks(recovery, currentReq, ctx, plugins, hookRequests);
+        } catch (responseError) {
+          // Report the new failure and finish cleanup without starting another recovery cycle.
+          for (const plugin of plugins) {
+            if (typeof plugin.onError !== "function") continue;
+            try {
+              await plugin.onError(
+                responseError,
+                hookRequests.get(plugin) ?? currentReq,
+                this.pluginCtx,
+                ctx,
+              );
+            } catch (hookError) {
+              this.log("error", "[HyperCore] Error hook failed", hookError);
+            }
+          }
+          throw responseError;
         }
       }
       throw err;
     }
   }
 
+  private assertRunning(): void {
+    if (this.state === "initializing") {
+      throw new HyperClientError(
+        "[HyperCore] Operations cannot start during setup initialization.",
+      );
+    }
+    this.assertActive();
+  }
+
+  private assertActive(): void {
+    if (this.isDestroyed) {
+      throw new HyperClientError("[HyperCore] Core instance has been destroyed.");
+    }
+  }
+
+  private async resolveRegisteredProtocol<P extends SenderProtocol>(
+    protocol: P,
+  ): Promise<AnyHyperProtocol<P>> {
+    this.assertActive();
+    const existing = this.registry.get(protocol);
+    if (existing) return existing;
+    const loaded = await resolveProtocol(protocol);
+    this.assertActive();
+    // Explicit registration during the import has priority over its late result.
+    const registered = this.registry.get(protocol);
+    if (registered) return registered;
+    this.registerProtocol(loaded);
+    return loaded;
+  }
+
   private async resolveRequestSender(
     protocol: SenderProtocol,
   ): Promise<HyperSender<any, any, any, any>> {
-    let resolved = this.registry.get(protocol);
-    if (!resolved) {
-      resolved = await resolveProtocol(protocol);
-      this.registerProtocol(resolved);
-    }
+    const resolved = await this.resolveRegisteredProtocol(protocol);
 
     const sender = resolved.sender;
     if (!sender) {
@@ -621,6 +788,7 @@ export class HyperCore implements IHyperCore {
     req: SendRequest<any, any>,
     ctx: RequestContext,
     plugins: readonly HyperPlugin[],
+    hookRequests: ReadonlyMap<HyperPlugin, SendRequest<any, any>>,
   ): Promise<UniversalResponse<TOutput>> {
     let response = initialResponse;
 
@@ -628,14 +796,16 @@ export class HyperCore implements IHyperCore {
       const plugin = plugins[i]!;
       if (typeof plugin.onResponse !== "function") continue;
 
+      const hookRequest = hookRequests.get(plugin) ?? req;
       if (plugin.mode === "background") {
+        const snapshot = { ...response, headers: { ...response.headers } };
         void Promise.resolve()
-          .then(() => plugin.onResponse!(response, req, this.pluginCtx, ctx))
+          .then(() => plugin.onResponse!(snapshot, hookRequest, this.pluginCtx, ctx))
           .catch((err: unknown) => this.reportBackgroundPluginError(err));
         continue;
       }
 
-      const result = await plugin.onResponse(response, req, this.pluginCtx, ctx);
+      const result = await plugin.onResponse(response, hookRequest, this.pluginCtx, ctx);
       if (result != null && isUniversalResponse(result)) {
         response = result as UniversalResponse<TOutput>;
       }
@@ -658,13 +828,17 @@ export class HyperCore implements IHyperCore {
   }
 
   private log(level: "debug" | "info" | "warn" | "error", message: string, meta?: unknown): void {
-    if (this.config.logger) {
-      this.config.logger(level, message, meta);
-      return;
+    try {
+      if (this.config.logger) {
+        this.config.logger(level, message, meta);
+        return;
+      }
+      if (!this.config.verbose && level !== "error") return;
+      const output = level === "debug" ? console.debug : console[level];
+      output(message, meta);
+    } catch {
+      // Diagnostics must never interrupt lifecycle cleanup.
     }
-    if (!this.config.verbose && level !== "error") return;
-    const output = level === "debug" ? console.debug : console[level];
-    output(message, meta);
   }
 
   /**
@@ -720,6 +894,8 @@ export class HyperCore implements IHyperCore {
       this.fixedTransport && (!requireListen || typeof this.fixedTransport.listen === "function")
         ? this.fixedTransport
         : await resolveTransport(protocol, {
+            ...this.config,
+            cacheKey: this.config,
             customTransport: this.fixedTransport ?? this.config.customTransport,
             requireListen,
             logger: this.config.logger,
@@ -768,6 +944,7 @@ export class HyperCore implements IHyperCore {
     req: SendRequest<TInput, string>,
     ctx: RequestContext,
   ): Promise<UniversalResponse<TOutput>> {
+    this.assertActive();
     const transport =
       this.transports.get(req.protocol) ?? (await this.acquireTransport(req.protocol));
     const prepared = sender.prepare(req, ctx);
@@ -787,6 +964,19 @@ export class HyperCore implements IHyperCore {
   public async listen<P extends SenderProtocol = SenderProtocol>(
     options: HyperServerListenOptions<P>,
   ): Promise<TransportServer> {
+    this.assertRunning();
+    const pending = this.startListening(options);
+    this.pendingListeners.add(pending);
+    try {
+      return await pending;
+    } finally {
+      this.pendingListeners.delete(pending);
+    }
+  }
+
+  private async startListening<P extends SenderProtocol>(
+    options: HyperServerListenOptions<P>,
+  ): Promise<TransportServer> {
     const transport = await this.acquireTransport(options.protocol, true);
 
     if (typeof transport.listen !== "function") {
@@ -795,11 +985,7 @@ export class HyperCore implements IHyperCore {
       );
     }
 
-    let resolved = this.registry.get(options.protocol);
-    if (!resolved) {
-      resolved = await resolveProtocol(options.protocol);
-      this.registerProtocol(resolved);
-    }
+    const resolved = await this.resolveRegisteredProtocol(options.protocol);
 
     const receiver = resolved.receiver as
       | HyperReceiver<unknown, unknown, TransportRequest, TransportResponse, P>
@@ -815,10 +1001,73 @@ export class HyperCore implements IHyperCore {
       | undefined;
 
     const onRequest = async (raw: TransportRequest): Promise<TransportResponse> => {
-      const ctx = createServerRequestContext(raw);
-      const request = await receiver.receive(raw, ctx);
-      const response = handler ? await handler(request, ctx) : await receiver.handle(request, ctx);
-      return receiver.respond(response, ctx);
+      const ctx = Object.assign(createServerRequestContext(raw), { protocol: options.protocol });
+      const plugins = this.plugins;
+      let currentRequest = raw;
+      let outcome: ServerRequestOutcome;
+      let responseHooksStarted = false;
+      const responseHooks = async (initial: TransportResponse): Promise<TransportResponse> => {
+        let response = initial;
+        for (const plugin of plugins) {
+          const result = await plugin.onServerResponse?.(
+            response,
+            currentRequest,
+            this.pluginCtx,
+            ctx,
+          );
+          if (result !== undefined) response = result;
+        }
+        return response;
+      };
+      const errorHooks = async (error: unknown): Promise<TransportResponse | undefined> => {
+        let recovery: TransportResponse | undefined;
+        for (const plugin of plugins) {
+          try {
+            const result = await plugin.onServerError?.(error, currentRequest, this.pluginCtx, ctx);
+            if (recovery === undefined && result !== undefined) recovery = result;
+          } catch (diagnostic) {
+            this.log("error", "[HyperCore] Server error hook failed", diagnostic);
+          }
+        }
+        return recovery;
+      };
+      try {
+        for (const plugin of plugins) {
+          const result = await plugin.onServerRequest?.(currentRequest, this.pluginCtx, ctx);
+          if (result !== undefined) {
+            currentRequest = result;
+            (ctx as { signal?: AbortSignal }).signal = currentRequest.signal;
+          }
+        }
+        const request = await receiver.receive(currentRequest, ctx);
+        const response = handler
+          ? await handler(request, ctx)
+          : await receiver.handle(request, ctx);
+        const serialized = await receiver.respond(response, ctx);
+        responseHooksStarted = true;
+        outcome = { ok: true, response: await responseHooks(serialized) };
+      } catch (error) {
+        const recovery = await errorHooks(error);
+        if (recovery === undefined) outcome = { ok: false, error };
+        else if (responseHooksStarted) outcome = { ok: true, response: recovery };
+        else {
+          try {
+            outcome = { ok: true, response: await responseHooks(recovery) };
+          } catch (responseError) {
+            await errorHooks(responseError);
+            outcome = { ok: false, error: responseError };
+          }
+        }
+      }
+      for (const plugin of plugins) {
+        try {
+          await plugin.onServerSettled?.(outcome, currentRequest, this.pluginCtx, ctx);
+        } catch (diagnostic) {
+          this.log("error", "[HyperCore] Server settlement hook failed", diagnostic);
+        }
+      }
+      if (!outcome.ok) throw outcome.error;
+      return outcome.response;
     };
 
     const server = await transport.listen!({
@@ -835,8 +1084,19 @@ export class HyperCore implements IHyperCore {
       );
     }
 
-    this.servers.add(server);
-    return server;
+    let closing: Promise<void> | undefined;
+    const tracked: TransportServer = {
+      close: () => {
+        closing ??= Promise.resolve()
+          .then(() => server.close())
+          .then(() => {
+            this.servers.delete(tracked);
+          });
+        return closing;
+      },
+    };
+    this.servers.add(tracked);
+    return tracked;
   }
 
   /**
@@ -874,10 +1134,25 @@ export class HyperCore implements IHyperCore {
   }
 
   public use(plugin: HyperPlugin): this {
+    this.assertActive();
+    if (this.plugins.includes(plugin)) return this;
+    if (this.plugins.some((existing) => existing.name === plugin.name)) {
+      throw new HyperClientError(`[HyperCore] Plugin "${plugin.name}" is already registered.`);
+    }
+    const owner = pluginOwners.get(plugin);
+    if (!plugin.shared && owner && owner !== this) {
+      throw new HyperClientError(
+        "[HyperCore] Plugin instances cannot be shared across cores. Supply a fresh instance.",
+      );
+    }
+    if (plugin.shared && plugin.setup) {
+      throw new HyperClientError("[HyperCore] Shared stateless plugins cannot define setup().");
+    }
     const enabled = plugin.enabled ? plugin.enabled(this.config) : true;
     if (!enabled) return this;
 
     plugin.setup?.(this.pluginCtx);
+    if (!plugin.shared) pluginOwners.set(plugin, this);
     this.plugins = [...this.plugins, plugin].sort(
       (a, b) => (PLUGIN_PHASE_ORDER[a.phase ?? ""] ?? 0) - (PLUGIN_PHASE_ORDER[b.phase ?? ""] ?? 0),
     );
@@ -893,6 +1168,7 @@ export class HyperCore implements IHyperCore {
    * @returns A new IHyperCore instance.
    */
   public extend(options: Partial<HyperClientOptions>): IHyperCore {
+    this.assertActive();
     const transport = options.customTransport ?? this.fixedTransport ?? undefined;
     const sharedTransports = options.customTransport ? undefined : this.transportPromises;
     return new HyperCore({ ...this.config, ...options }, transport, sharedTransports);
@@ -909,6 +1185,7 @@ export class HyperCore implements IHyperCore {
    * @returns A new IHyperCore instance.
    */
   public create(options: Partial<HyperClientOptions>): IHyperCore {
+    this.assertActive();
     const base: Partial<HyperClientOptions> = { ...this.config };
     delete base.customTransport;
     return new HyperCore({ ...base, ...options });
@@ -925,6 +1202,11 @@ export class HyperCore implements IHyperCore {
    * @returns Promise that resolves when shutdown is complete.
    */
   public destroy(graceful = true): Promise<void> {
+    if (this.state === "initializing") {
+      return Promise.reject(
+        new HyperClientError("[HyperCore] Cannot destroy during setup initialization."),
+      );
+    }
     if (!this.destroyPromise) {
       this.destroyPromise = this.performDestroy(graceful);
     }
@@ -932,8 +1214,11 @@ export class HyperCore implements IHyperCore {
   }
 
   private async performDestroy(graceful: boolean): Promise<void> {
-    this.isDestroyed = true;
+    this.state = "destroying";
+    // Accepted calls finish or reject at the next admission check before resources close.
+    if (graceful) await Promise.allSettled(this.activeRequests);
 
+    await Promise.allSettled(this.pendingListeners);
     for (const server of this.servers) {
       try {
         await server.close();
@@ -972,5 +1257,6 @@ export class HyperCore implements IHyperCore {
         this.log("error", "[HyperCore] Error closing transport during destroy", err);
       }
     }
+    this.state = "destroyed";
   }
 }
