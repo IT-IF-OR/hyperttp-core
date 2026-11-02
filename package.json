@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
