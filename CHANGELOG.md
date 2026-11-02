@@ -1,5 +1,28 @@
 # Changelog
 
+## [3.0.1] — 2026-11-03
+
+### Added
+
+- Added a GitHub Release publication workflow using npm Trusted Publishing (OIDC) and provenance, without a long-lived npm token. Publication requires the full CI workflow to pass and uses its validated `dist` artifact.
+- Added release tag/version and prerelease checks: stable releases use the npm `latest` tag; prereleases use `next`. Publication targets the GitHub `npm` environment.
+- Added a standalone built-Core smoke test for parsing, recovery, exactly-once settlement and shutdown, without requiring sibling repositories.
+- Added a `check` script combining formatting, lint, source/test typechecking and unit tests.
+
+### Fixed
+
+- Cleaned `dist` before each build to prevent deleted source files from leaving stale artifacts in published packages.
+- Moved CI quality checks to Node.js 24 and unit tests to Node.js 22/24/26, matching Vitest 5 requirements. Installed-package runtime and declaration checks still cover Node.js 20/22/24/26.
+- Changed Bun, Deno and browser CI checks to use the validated build artifact instead of only checking source files. Added headless Chrome execution and removed `skipLibCheck` from the installed-package declaration check.
+- Made Deno smoke checks independent of automatic dependency installation and the repository's outdated Deno lockfile.
+
+### Changed
+
+- Updated GitHub Actions checkout, Node setup and artifact actions to Node.js 24-based releases, pinned to verified commit SHAs. Pinned the Bun setup action and fixed CI runners to Ubuntu 24.04.
+- Aligned the declared and CI Bun versions at 1.4.4; removed the duplicate unit-test run before coverage measurement.
+- Made root publication commands run checks and a clean build before publishing. Direct publication of `dist` remains a separate path; the release workflow explicitly validates it through CI.
+- Updated English and Russian documentation for `@hyperttp/types@^0.5.0`, plugin isolation, settlement, server hooks, transport selection, shutdown and release setup. REST routing and service injection remain outside Core, in the high-level `hyperttp` package.
+
 ## [3.0.0] — 2026-11-03
 
 ### Added
@@ -8,7 +31,7 @@
 
 - Added separate blocking server request/response/error/settled plugin hooks to the listen lifecycle, without implicitly applying client plugins.
 
-- Added coordinated built-package smoke checks for Node, Bun and Deno, a strict built declaration consumer and a release checklist.
+- Added built-package smoke checks for Node, Bun and Deno, a strict built declaration consumer and a Chromium runner.
 
 - Added optional request settlement callbacks and finalized-response reuse for exactly-once resource cleanup and final inflight outcomes.
 - Added per-core `pluginFactories` and explicit `shared: true` stateless plugins (without setup).
@@ -32,7 +55,7 @@
 
 - Core initialization rejects network operations from setup; graceful destroy waits for accepted client calls including settlement.
 - Protocol replacement preserves user overrides of previously generated flat methods.
-- Duplicate registration of the same plugin instance on one core is idempotent; duplicate names and cross-core instance reuse are rejected before setup. Supply fresh plugin instances through `plugins` when using `extend()` or `create()`.
+- Duplicate registration of the same plugin instance on one core is idempotent; duplicate names and implicit cross-core instance reuse are rejected before setup. Prefer `pluginFactories` for independent stateful instances, or supply fresh `plugins` when using `extend()` or `create()`. Stateless instances may opt into sharing with `shared: true` and no `setup()`.
 - Streaming bodies with timeout/abort handling may be returned through lifecycle wrappers rather than preserving their original stream identity.
 
 ## [2.0.5] — 2026-10-26
