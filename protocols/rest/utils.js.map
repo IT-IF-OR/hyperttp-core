@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/protocols/rest/utils.ts"],
+  "sourcesContent": ["export const DEFAULT_STATUS_TEXTS: Readonly<Record<number, string>> = {\n  200: \"OK\",\n  201: \"Created\",\n  204: \"No Content\",\n  400: \"Bad Request\",\n  401: \"Unauthorized\",\n  403: \"Forbidden\",\n  404: \"Not Found\",\n  500: \"Internal Server Error\",\n};\n\nexport function getHeaderValue(\n  headers: Readonly<Record<string, string | string[]>>,\n  name: string,\n): string | undefined {\n  const direct = headers[name] ?? headers[name.toLowerCase()];\n  if (direct !== undefined) return Array.isArray(direct) ? direct[0] : direct;\n\n  const target = name.toLowerCase();\n  for (const key in headers) {\n    if (key.toLowerCase() === target) {\n      const value = headers[key];\n      return Array.isArray(value) ? value[0] : value;\n    }\n  }\n}\n"],
+  "mappings": "aAAO,aAAM,qBAAyD,CACpE,IAAK,KACL,IAAK,UACL,IAAK,aACL,IAAK,cACL,IAAK,eACL,IAAK,YACL,IAAK,YACL,IAAK,yBAGD,gBAAU,eACdA,EACAC,EAAY,CAEZ,MAAMC,EAASF,EAAQC,CAAI,GAAKD,EAAQC,EAAK,YAAW,CAAE,EAC1D,GAAIC,IAAW,OAAW,OAAO,MAAM,QAAQA,CAAM,EAAIA,EAAO,CAAC,EAAIA,EAErE,MAAMC,EAASF,EAAK,YAAW,EAC/B,UAAWG,KAAOJ,EAChB,GAAII,EAAI,YAAW,IAAOD,EAAQ,CAChC,MAAME,EAAQL,EAAQI,CAAG,EACzB,OAAO,MAAM,QAAQC,CAAK,EAAIA,EAAM,CAAC,EAAIA,CAC3C,CAEJ",
+  "names": ["headers", "name", "direct", "target", "key", "value"]
+}

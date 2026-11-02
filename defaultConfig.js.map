@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/defaultConfig.ts"],
+  "sourcesContent": ["import type { HyperClientOptions } from \"@hyperttp/types\";\n\n/**\n * @ru Конфигурация по умолчанию универсального ядра.\n * @en Default configuration for the universal core.\n */\nexport const defaultCoreConfig: HyperClientOptions = {\n  retry: {\n    maxRetries: 0,\n    baseDelay: 100,\n    maxDelay: 5000,\n    jitter: true,\n  },\n  verbose: false,\n};\n"],
+  "mappings": "aAMO,aAAM,kBAAwC,CACnD,MAAO,CACL,WAAY,EACZ,UAAW,IACX,SAAU,IACV,OAAQ,IAEV,QAAS",
+  "names": []
+}
