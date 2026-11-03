@@ -50,18 +50,25 @@ describe("protocol manager", () => {
     await core.destroy();
   });
 
-  it("resolves the rest sender", async () => {
-    const sender = await resolveSender("rest");
-
-    expect(sender).toBeDefined();
-    expect(sender.protocol).toBe("rest");
+  it("does not auto-resolve REST protocol roles or import the external package", async () => {
+    const loader = vi.spyOn(modules, "dynamicImport");
+    for (const resolve of [resolveProtocol, resolveSender, resolveReceiver]) {
+      await expect(resolve("rest")).rejects.toThrow(/No protocol available for "rest"/);
+    }
+    expect(loader).not.toHaveBeenCalled();
   });
 
-  it("caches the resolved sender per protocol", async () => {
-    const first = await resolveSender("rest");
-    const second = await resolveSender("rest");
+  it("caches the resolved sender per external protocol", async () => {
+    const sender = { protocol: "grpc" };
+    const loader = vi.spyOn(modules, "dynamicImport").mockResolvedValue({
+      GrpcProtocol: { protocol: "grpc", sender },
+    });
+    const first = await resolveSender("grpc");
+    const second = await resolveSender("grpc");
 
+    expect(first).toBe(sender);
     expect(second).toBe(first);
+    expect(loader).toHaveBeenCalledExactlyOnceWith("@hyperttp/protocol-grpc");
   });
 
   it("throws for a packaged protocol sender that is not installed", async () => {
@@ -215,8 +222,8 @@ describe("protocol manager", () => {
     expect(loader).toHaveBeenCalledExactlyOnceWith("@hyperttp/protocol-websocket");
   });
 
-  it("exposes the known protocol list including rest", () => {
-    expect(KNOWN_PROTOCOLS).toContain("rest");
+  it("excludes REST from the auto-resolved protocol list", () => {
+    expect(KNOWN_PROTOCOLS).not.toContain("rest");
     expect(KNOWN_PROTOCOLS).toContain("graphql");
     expect(KNOWN_PROTOCOLS).toContain("grpc");
   });

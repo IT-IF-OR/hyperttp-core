@@ -1,3 +1,4 @@
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import { describe, expect, it, vi } from "vitest";
 import { HyperCore } from "../src/index.js";
 import type {
@@ -15,7 +16,7 @@ async function start(
 ) {
   let onRequest: TransportListenOptions["onRequest"];
   const core = new HyperCore(
-    { plugins, logger: vi.fn() },
+    { protocols: [RestProtocol], plugins, logger: vi.fn() },
     {
       execute: async () => {
         throw new Error("client I/O must not run");

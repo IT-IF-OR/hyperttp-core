@@ -1,3 +1,9 @@
+## Unreleased — breaking
+
+- Move REST sender, receiver and types into `@hyperttp/protocol-rest`.
+- Require explicit `RestProtocol` registration for direct `HyperCore` use.
+- Remove REST exports and the `@hyperttp/core/rest` entry point.
+
 # Changelog
 
 ## [3.0.1] — 2026-11-03

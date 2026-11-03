@@ -3,7 +3,7 @@ import { dynamicImport } from "../utils/modules.js";
 import type {
   HyperTransport,
   LogLevel,
-  SenderProtocol,
+  HyperProtocolName,
   TransportListenOptions,
   TransportRequest,
   TransportResponse,
@@ -17,7 +17,7 @@ export interface FetchTransportOptions {
    * @ru Кастомный список поддерживаемых протоколов.
    * @en Custom list of supported protocols.
    */
-  protocols?: SenderProtocol[];
+  protocols?: HyperProtocolName[];
   /**
    * @ru Максимальный размер входящего серверного тела в байтах. Превышение
    * возвращает HTTP 413 до передачи тела обработчику.
@@ -85,7 +85,7 @@ async function* readWebStream(
  * packaged transport (@hyperttp/transport-undici/bun) is installed.
  */
 export class FetchTransport implements HyperTransport {
-  public readonly protocols: readonly SenderProtocol[];
+  public readonly protocols: readonly HyperProtocolName[];
   private readonly maxBodyBytes: number;
   private readonly onError?: FetchTransportOptions["onError"];
   private readonly logger?: FetchTransportOptions["logger"];

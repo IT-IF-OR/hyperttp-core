@@ -3,14 +3,13 @@ import type {
   HyperProtocol,
   HyperReceiver,
   HyperSender,
-  SenderProtocol,
+  HyperProtocolName,
 } from "@hyperttp/types";
 import { HyperClientError } from "../utils/errors.js";
 import { dynamicImport, isModuleNotFoundError } from "../utils/modules.js";
-import { RestProtocol } from "./rest/index.js";
 
 type ProtocolDef = {
-  readonly protocol: SenderProtocol;
+  readonly protocol: HyperProtocolName;
   readonly pkg: string;
   readonly export: string;
 };
@@ -39,36 +38,28 @@ const PROTOCOL_DEFS: readonly ProtocolDef[] = [
 ];
 
 /**
- * @ru Известные протоколы ядра: встроенный rest и пакетные модули.
- * @en Known core protocols: the built-in rest and packaged modules.
+ * @ru Известные опциональные пакетные протоколы.
+ * @en Known optional packaged protocols.
  */
-export const KNOWN_PROTOCOLS: readonly SenderProtocol[] = Object.freeze([
-  "rest",
-  ...PROTOCOL_DEFS.map((d) => d.protocol),
-]);
+export const KNOWN_PROTOCOLS: readonly HyperProtocolName[] = Object.freeze(
+  PROTOCOL_DEFS.map((d) => d.protocol),
+);
 
 const protocolCache = new Map<string, AnyHyperProtocol>();
 const pendingProtocols = new Map<string, Promise<AnyHyperProtocol>>();
 let cacheGeneration = 0;
 
 /**
- * @ru Разрешает модуль протокола. Встроенный rest возвращается статически,
- * остальные протоколы загружаются из пакетных модулей по требованию.
- * @en Resolves a protocol module. The built-in rest is returned statically,
- * other protocols are loaded from packaged modules on demand.
+ * @ru Разрешает опциональный пакетный модуль протокола.
+ * @en Resolves an optional packaged protocol module.
  */
-export async function resolveProtocol<P extends SenderProtocol>(
+export async function resolveProtocol<P extends HyperProtocolName>(
   protocol: P,
   options?: { [key: string]: unknown },
 ): Promise<HyperProtocol<unknown, unknown, unknown, unknown, P>> {
   const cached = protocolCache.get(protocol);
   if (cached) {
     return cached as AnyHyperProtocol<P>;
-  }
-
-  if (protocol === "rest") {
-    protocolCache.set(protocol, RestProtocol);
-    return RestProtocol as AnyHyperProtocol<P>;
   }
 
   const pending = pendingProtocols.get(protocol);
@@ -89,7 +80,7 @@ export async function resolveProtocol<P extends SenderProtocol>(
 }
 
 async function loadProtocol(
-  protocol: SenderProtocol,
+  protocol: HyperProtocolName,
   options?: { [key: string]: unknown },
 ): Promise<AnyHyperProtocol> {
   for (let i = 0; i < PROTOCOL_DEFS.length; i++) {
@@ -123,7 +114,7 @@ async function loadProtocol(
  * @ru Разрешает клиентский сендер протокола.
  * @en Resolves the client sender of a protocol.
  */
-export async function resolveSender<P extends SenderProtocol>(
+export async function resolveSender<P extends HyperProtocolName>(
   protocol: P,
   options?: { [key: string]: unknown },
 ): Promise<HyperSender<unknown, unknown, unknown, unknown, P>> {
@@ -138,7 +129,7 @@ export async function resolveSender<P extends SenderProtocol>(
  * @ru Разрешает серверный ресивер протокола.
  * @en Resolves the server receiver of a protocol.
  */
-export async function resolveReceiver<P extends SenderProtocol>(
+export async function resolveReceiver<P extends HyperProtocolName>(
   protocol: P,
   options?: { [key: string]: unknown },
 ): Promise<HyperReceiver<unknown, unknown, unknown, unknown, P>> {

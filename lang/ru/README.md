@@ -1,3 +1,7 @@
+> Breaking change: REST is provided by `@hyperttp/protocol-rest`.
+> Register `RestProtocol` explicitly when using `HyperCore`; `hyperttp` registers it automatically.
+> REST classes and types are no longer exported by `@hyperttp/core` or `@hyperttp/core/rest`.
+
 # @hyperttp/core
 
 > Протокол-независимое ядро выполнения для клиентских и серверных коммуникаций.
@@ -22,9 +26,8 @@ HTTP-фреймворк «со всем из коробки». Оно связы
   запросы и может дополнительно слушать входящие запросы.
 - **Плагины** добавляют клиентские политики и явные серверные lifecycle hooks, не расширяя ядро.
 
-Ядро отвечает за диспетчеризацию, lifecycle, выполнение плагинов и управление ресурсами. REST входит
-в базовую поставку; дополнительные протоколы, оптимизированные транспорты и высокоуровневое поведение
-живут в отдельных пакетах.
+Ядро отвечает за диспетчеризацию, lifecycle, выполнение плагинов и управление ресурсами.
+Все реализации протоколов, включая REST, живут в отдельных пакетах.
 
 ```text
 Приложение
@@ -80,8 +83,9 @@ npm install @hyperttp/core @hyperttp/types
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
+import { RestProtocol } from "@hyperttp/protocol-rest";
 
-const core = new HyperCore();
+const core = new HyperCore({ protocols: [RestProtocol] });
 
 const response = await core.rest.get("https://example.com/users", {
   query: { page: 1 },
@@ -113,8 +117,9 @@ const response = await core.send({
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
+import { RestProtocol } from "@hyperttp/protocol-rest";
 
-const core = new HyperCore();
+const core = new HyperCore({ protocols: [RestProtocol] });
 
 const server = await core.listen({
   protocol: "rest",
@@ -145,12 +150,11 @@ await core.destroy();
 
 ## Протоколы
 
-REST — единственный протокол, реализованный внутри ядра. Внешние модули протоколов загружаются
-лениво:
+REST регистрируется явно из отдельного пакета. Другие известные модули могут загружаться лениво:
 
 | Протокол  | Пакет                          | Namespace                    |
 | --------- | ------------------------------ | ---------------------------- |
-| REST      | встроен                        | `core.rest`                  |
+| REST      | `@hyperttp/protocol-rest`                        | `core.rest`                  |
 | GraphQL   | `@hyperttp/protocol-graphql`   | `core.graphql`               |
 | gRPC      | `@hyperttp/protocol-grpc`      | `core.grpc`                  |
 | tRPC      | `@hyperttp/protocol-trpc`      | `core.trpc`                  |
@@ -252,6 +256,7 @@ Custom transport не попадает в default cache независимых �
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import { UndiciTransport } from "@hyperttp/transport-undici";
 
 const core = new HyperCore({
@@ -410,7 +415,7 @@ credentials при redirect: redirect и работа с credentials завис�
 
 Core не добавляет клиентский base URL; со встроенным fetch-транспортом используйте абсолютные URL.
 
-Публичные REST-типы доступны из `@hyperttp/core/rest`.
+Публичные REST-типы доступны из `@hyperttp/protocol-rest`.
 
 ## Lifecycle
 
@@ -443,7 +448,8 @@ await core.destroy();
 ## Обработка ошибок
 
 ```ts
-import { HyperClientError, TimeoutError } from "@hyperttp/core";
+import { HyperClientError } from "@hyperttp/core";
+import { TimeoutError } from "@hyperttp/protocol-rest";
 
 try {
   await core.rest.get("https://example.com/slow", { timeout: 1_000 });

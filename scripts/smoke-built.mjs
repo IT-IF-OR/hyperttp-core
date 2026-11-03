@@ -1,3 +1,4 @@
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import assert from "node:assert/strict";
 import { HyperCore } from "../dist/index.js";
 import { withInflight } from "../../hyperttp-inflight/dist/index.js";
@@ -22,6 +23,7 @@ for (const scenario of ["success", "response-error", "recovery"]) {
   const failure = new Error("late response failure");
   const core = new HyperCore(
     {
+      protocols: [RestProtocol],
       pluginFactories: [
         () => withQueue({ maxConcurrent: 2 }),
         () =>
@@ -105,7 +107,7 @@ const previousBuffer = globalThis.Buffer;
 try {
   globalThis.Buffer = undefined;
   const core = new HyperCore(
-    {},
+    { protocols: [RestProtocol] },
     {
       async execute(request) {
         assert.equal(new TextDecoder().decode(request.body), '{"text":"Привет 🌍"}');

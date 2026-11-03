@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HyperCore, RestProtocol, RestReceiver } from "../src/index.js";
+import { HyperCore } from "../src/index.js";
+import { RestProtocol, RestReceiver, RestSender } from "@hyperttp/protocol-rest";
 import { resetCachedProtocols, resolveReceiver } from "../src/protocols/manager.js";
 import type {
   HyperTransport,
@@ -9,8 +10,7 @@ import type {
   TransportResponse,
   TransportServer,
 } from "@hyperttp/types";
-import type { RestServerResponse } from "../src/protocols/rest/type.js";
-import { RestSender } from "../src/index.js";
+import type { RestServerResponse } from "@hyperttp/protocol-rest";
 import { FetchTransport } from "../src/transports/fetch.js";
 
 function makeRawRequest(overrides: Partial<TransportRequest> = {}): TransportRequest {
@@ -57,10 +57,8 @@ afterEach(() => {
 });
 
 describe("receiver manager", () => {
-  it("resolves the rest receiver", async () => {
-    const receiver = await resolveReceiver("rest");
-    expect(receiver).toBeInstanceOf(RestReceiver);
-    expect(receiver.protocol).toBe("rest");
+  it("does not auto-resolve the external REST receiver", async () => {
+    await expect(resolveReceiver("rest")).rejects.toThrow(/No protocol available for "rest"/);
   });
 
   it("throws for a packaged protocol receiver that is not installed", async () => {
@@ -110,9 +108,20 @@ describe("HyperProtocol unified module", () => {
 });
 
 describe("HyperCore.listen (server role)", () => {
+  it("forwards transport signaling options unchanged", async () => {
+    const transport = new MockServerTransport();
+    const listen = vi.spyOn(transport, "listen");
+    const core = new HyperCore({ protocols: [RestProtocol] }, transport);
+    const signaling = { path: "/rtc", authorize: vi.fn(() => true) };
+    const server = await core.listen({ protocol: "rest", signaling });
+    expect(listen.mock.calls[0]?.[0].signaling).toBe(signaling);
+    expect(signaling.authorize).not.toHaveBeenCalled();
+    await server.close();
+    await core.destroy();
+  });
   it("starts a server through the transport listen capability", async () => {
     const transport = new MockServerTransport();
-    const core = new HyperCore({}, transport);
+    const core = new HyperCore({ protocols: [RestProtocol] }, transport);
 
     const server = await core.listen({ protocol: "rest", port: 3000 });
     expect(server).toBeDefined();
@@ -121,7 +130,7 @@ describe("HyperCore.listen (server role)", () => {
 
   it("runs the receive → handle → respond pipeline with the listen handler", async () => {
     const transport = new MockServerTransport();
-    const core = new HyperCore({}, transport);
+    const core = new HyperCore({ protocols: [RestProtocol] }, transport);
     const handleSpy = vi.fn(
       (request: { path: string; query: Record<string, string>; body: unknown }) =>
         ({
@@ -180,15 +189,25 @@ describe("HyperCore.listen (server role)", () => {
     });
   });
 
-  it("lazily resolves and registers the rest receiver when not registered", async () => {
+  it("requires explicit REST registration before starting a server", async () => {
     const transport = new MockServerTransport();
+    const listen = vi.spyOn(transport, "listen");
     const core = new HyperCore({}, transport);
+    try {
+      await expect(core.listen({ protocol: "rest" })).rejects.toThrow(
+        /No protocol available for "rest"/,
+      );
+      expect(core.getReceiver("rest")).toBeUndefined();
+      expect(listen).not.toHaveBeenCalled();
 
-    await core.listen({ protocol: "rest", handler: () => ({ status: 200, body: "ok" }) });
-    expect(core.getReceiver("rest")).toBeInstanceOf(RestReceiver);
-
-    const res = await transport.onRequest!(makeRawRequest());
-    expect(res.status).toBe(200);
+      core.registerProtocol(RestProtocol);
+      await core.listen({ protocol: "rest", handler: () => ({ status: 200, body: "ok" }) });
+      expect(core.getReceiver("rest")).toBe(RestProtocol.receiver);
+      const response = await transport.onRequest!(makeRawRequest());
+      expect(response.status).toBe(200);
+    } finally {
+      await core.destroy();
+    }
   });
 
   it("uses FetchTransport for listen() when the client transport has no server role", async () => {
@@ -201,7 +220,7 @@ describe("HyperCore.listen (server role)", () => {
     const clientOnly = { execute, close: async () => {} };
     const serverHandle = { close: vi.fn(async () => {}) };
     const listen = vi.spyOn(FetchTransport.prototype, "listen").mockResolvedValue(serverHandle);
-    const core = new HyperCore({}, clientOnly as HyperTransport);
+    const core = new HyperCore({ protocols: [RestProtocol] }, clientOnly as HyperTransport);
 
     await expect(core.listen({ protocol: "rest" })).resolves.toEqual({
       close: expect.any(Function),
@@ -217,7 +236,7 @@ describe("HyperCore.listen (server role)", () => {
 
   it("destroy closes active servers and the transport", async () => {
     const transport = new MockServerTransport();
-    const core = new HyperCore({}, transport);
+    const core = new HyperCore({ protocols: [RestProtocol] }, transport);
 
     await core.listen({ protocol: "rest", handler: () => ({ status: 200, body: "ok" }) });
     await core.destroy();
