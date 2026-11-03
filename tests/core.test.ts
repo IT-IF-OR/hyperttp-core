@@ -1,5 +1,6 @@
 import { describe, it, expect, expectTypeOf, vi } from "vitest";
-import { HyperCore, HyperClientError, RestSender, TimeoutError } from "../src/index.js";
+import { HyperCore, HyperClientError } from "../src/index.js";
+import { RestProtocol, RestSender, TimeoutError } from "@hyperttp/protocol-rest";
 import type {
   HyperProtocol,
   HyperSender,
@@ -74,8 +75,8 @@ describe("HyperCore (universal core)", () => {
     expect(res.data).toEqual({ ok: true, url: "/users" });
   });
 
-  it("lazily resolves and registers the sender via the manager", async () => {
-    const core = new HyperCore({}, makeMockTransport());
+  it("dispatches through an explicitly configured external REST protocol", async () => {
+    const core = new HyperCore({ protocols: [RestProtocol] }, makeMockTransport());
     const res = await core.send({
       protocol: "rest",
       input: { method: "GET", url: "/lazy" },
@@ -156,13 +157,28 @@ describe("HyperCore (universal core)", () => {
     expect(response.data).toEqual({ peerUrl: "webrtc://peer.example" });
   });
 
-  it("lazily resolves the sender when the rest namespace is used without registration", async () => {
-    const core = new HyperCore({}, makeMockTransport());
-    const res = await core.rest.get("/lazy-rest");
+  it("requires explicit REST registration even when the external package is installed", async () => {
+    const transport = makeMockTransport();
+    const execute = vi.spyOn(transport, "execute");
+    const core = new HyperCore({}, transport);
+    try {
+      expect(core.getProtocol("rest")).toBeUndefined();
+      expect(core.getSender("rest")).toBeUndefined();
+      expect(core.getReceiver("rest")).toBeUndefined();
+      expect((core as unknown as Record<string, unknown>).rest).toBeUndefined();
+      await expect(
+        core.send({ protocol: "rest", input: { method: "GET", url: "/unregistered" } }),
+      ).rejects.toThrow(/No protocol available for "rest"/);
+      expect(execute).not.toHaveBeenCalled();
 
-    expect(res.status).toBe(200);
-    expect(res.url).toBe("/lazy-rest");
-    expect(core.getSender("rest")).toBeDefined();
+      core.registerProtocol(RestProtocol);
+      const response = await core.rest.get("/registered");
+      expect(response.status).toBe(200);
+      expect(response.url).toBe("/registered");
+      expect(execute).toHaveBeenCalledOnce();
+    } finally {
+      await core.destroy();
+    }
   });
 
   it("reports the current transport name", async () => {
@@ -173,19 +189,19 @@ describe("HyperCore (universal core)", () => {
   });
 
   it("reports the sender name for the rest protocol", async () => {
-    const core = new HyperCore({}, makeMockTransport());
+    const core = new HyperCore({ protocols: [RestProtocol] }, makeMockTransport());
     const name = await core.getSenderName("rest");
     expect(name).toBe("RestSender");
   });
 
   it("reports the receiver name for the rest protocol", async () => {
-    const core = new HyperCore({}, makeMockTransport());
+    const core = new HyperCore({ protocols: [RestProtocol] }, makeMockTransport());
     const name = await core.getReceiverName("rest");
     expect(name).toBe("RestReceiver");
   });
 
   it("reports the protocol module name for the rest protocol", async () => {
-    const core = new HyperCore({}, makeMockTransport());
+    const core = new HyperCore({ protocols: [RestProtocol] }, makeMockTransport());
     const name = await core.getProtocolName("rest");
     expect(name).toBe("RestProtocol");
   });
@@ -574,7 +590,7 @@ describe("HyperCore (universal core)", () => {
       ...makeMockTransport(),
       listen: vi.fn(async () => serverHandle),
     };
-    const core = new HyperCore({ customTransport: transport });
+    const core = new HyperCore({ protocols: [RestProtocol], customTransport: transport });
 
     const server = await core.listen({ protocol: "rest" });
     expect(server.close).toBeTypeOf("function");
@@ -596,7 +612,7 @@ describe("HyperCore (universal core)", () => {
           }),
       ),
     };
-    const core = new HyperCore({ customTransport: transport });
+    const core = new HyperCore({ protocols: [RestProtocol], customTransport: transport });
     const listening = core.listen({ protocol: "rest" });
 
     await vi.waitFor(() => expect(transport.listen).toHaveBeenCalledOnce());
@@ -865,7 +881,7 @@ describe("HyperCore lifecycle regressions", () => {
           }),
       ),
     };
-    const core = new HyperCore({}, transport);
+    const core = new HyperCore({ protocols: [RestProtocol] }, transport);
     const listening = core.listen({ protocol: "rest" });
     const result = listening.catch((error) => error);
     await vi.waitFor(() => expect(transport.listen).toHaveBeenCalledOnce());
@@ -884,7 +900,10 @@ describe("HyperCore lifecycle regressions", () => {
 
   it("closes manually stopped servers exactly once", async () => {
     const native = { close: vi.fn(async () => {}) };
-    const core = new HyperCore({}, { ...makeMockTransport(), listen: async () => native });
+    const core = new HyperCore(
+      { protocols: [RestProtocol] },
+      { ...makeMockTransport(), listen: async () => native },
+    );
     const server = await core.listen({ protocol: "rest" });
     const first = server.close();
     expect(server.close()).toBe(first);

@@ -1,3 +1,4 @@
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import { HyperCore } from "../dist/index.js";
 
 function check(condition, message) {
@@ -18,19 +19,26 @@ const transport = {
       body: new TextEncoder().encode('{"ok":true}'),
     };
   },
-  async close() { closes++; },
+  async close() {
+    closes++;
+  },
 };
 const core = new HyperCore({
+  protocols: [RestProtocol],
   customTransport: transport,
-  plugins: [{
-    name: "settlement-smoke",
-    onRequest(_request, _plugin, context) {
-      context.onSettled(() => { settled++; });
+  plugins: [
+    {
+      name: "settlement-smoke",
+      onRequest(_request, _plugin, context) {
+        context.onSettled(() => {
+          settled++;
+        });
+      },
+      onError() {
+        return { protocol: "rest", ok: true, status: 200, headers: {}, data: { recovered: true } };
+      },
     },
-    onError() {
-      return { protocol: "rest", ok: true, status: 200, headers: {}, data: { recovered: true } };
-    },
-  }],
+  ],
 });
 const response = await core.rest.get("https://example.test/ok");
 check(response.data.ok === true, "JSON parsing failed");
@@ -40,6 +48,10 @@ check(calls === 2 && settled === 2, "Settlement must run once per call");
 await Promise.all([core.destroy(), core.destroy()]);
 check(closes === 1, "Transport must close once");
 let rejected = false;
-try { await core.rest.get("https://example.test/after-destroy"); } catch { rejected = true; }
+try {
+  await core.rest.get("https://example.test/after-destroy");
+} catch {
+  rejected = true;
+}
 check(rejected && calls === 2, "Shutdown admission failed");
 console.log("Core built-package smoke: parsing, recovery, settlement and shutdown OK");

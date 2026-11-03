@@ -1,3 +1,4 @@
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import { HyperCore } from "../dist/index.js";
 import type { CorePluginFactory } from "../dist/index.js";
 import { withInflight } from "../../hyperttp-inflight/dist/index.js";
@@ -17,7 +18,11 @@ const factories: readonly CorePluginFactory[] = [
 // Compile-only consumer: all four built declaration entry points share one type contract.
 export function checkBuiltContracts(context: RequestContext, outcome: RequestOutcome): void {
   const shared: HyperPlugin = { name: "stateless", shared: true };
-  const core = new HyperCore({ pluginFactories: factories, plugins: [shared] });
+  const core = new HyperCore({
+    protocols: [RestProtocol],
+    pluginFactories: factories,
+    plugins: [shared],
+  });
   const response: Promise<UniversalResponse<{ id: string }>> = core.send<{ id: string }>({
     protocol: "rest",
     input: { method: "GET", url: "/compile-only" },

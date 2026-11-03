@@ -16,7 +16,7 @@
     "forceConsistentCasingInFileNames": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": false,
+    "noEmit": false
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*"]
 }

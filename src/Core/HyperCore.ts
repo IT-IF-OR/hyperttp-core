@@ -17,7 +17,7 @@ import type {
   RequestContext,
   RequestOutcome,
   ServerRequestOutcome,
-  SenderProtocol,
+  HyperProtocolName,
   SendRequest,
   ServerRequestContext,
   TransportRequest,
@@ -191,13 +191,13 @@ function isUniversalResponse(value: unknown): value is UniversalResponse {
  * @en Internal protocol registry: stores unified modules (Sender + Receiver).
  */
 class DefaultProtocolRegistry implements ProtocolRegistry {
-  private readonly protocols = new Map<SenderProtocol, AnyHyperProtocol>();
+  private readonly protocols = new Map<HyperProtocolName, AnyHyperProtocol>();
 
-  public register<P extends SenderProtocol>(protocol: AnyHyperProtocol<P>): void {
+  public register<P extends HyperProtocolName>(protocol: AnyHyperProtocol<P>): void {
     this.protocols.set(protocol.protocol, protocol);
   }
 
-  public get<P extends SenderProtocol>(
+  public get<P extends HyperProtocolName>(
     protocol: P,
   ): HyperProtocol<unknown, unknown, unknown, unknown, P> | undefined {
     return this.protocols.get(protocol) as
@@ -205,7 +205,7 @@ class DefaultProtocolRegistry implements ProtocolRegistry {
       | undefined;
   }
 
-  public has(protocol: SenderProtocol): boolean {
+  public has(protocol: HyperProtocolName): boolean {
     return this.protocols.has(protocol);
   }
 
@@ -239,10 +239,10 @@ export class HyperCore implements IHyperCore {
   private readonly flatMethodValues = new Map<string, unknown>();
   private readonly protocolNamespaces = new Set<string>();
   private readonly generatedFlatMethods = new Set<string>();
-  private readonly transportPromises = new Map<SenderProtocol, Promise<HyperTransport>>();
-  private readonly transports = new Map<SenderProtocol, HyperTransport>();
-  private readonly listenTransportPromises = new Map<SenderProtocol, Promise<HyperTransport>>();
-  private readonly listenTransports = new Map<SenderProtocol, HyperTransport>();
+  private readonly transportPromises = new Map<HyperProtocolName, Promise<HyperTransport>>();
+  private readonly transports = new Map<HyperProtocolName, HyperTransport>();
+  private readonly listenTransportPromises = new Map<HyperProtocolName, Promise<HyperTransport>>();
+  private readonly listenTransports = new Map<HyperProtocolName, HyperTransport>();
   private readonly retainedTransports = new Set<HyperTransport>();
   private readonly fixedTransport: HyperTransport | null;
   private destroyPromise: Promise<void> | null = null;
@@ -256,7 +256,7 @@ export class HyperCore implements IHyperCore {
   constructor(
     config: Partial<HyperClientOptions> = {},
     transport?: HyperTransport,
-    sharedTransportPromises?: ReadonlyMap<SenderProtocol, Promise<HyperTransport>>,
+    sharedTransportPromises?: ReadonlyMap<HyperProtocolName, Promise<HyperTransport>>,
   ) {
     this.config = {
       ...defaultCoreConfig,
@@ -359,7 +359,7 @@ export class HyperCore implements IHyperCore {
    * @ru Получает зарегистрированный модуль протокола (Sender + Receiver).
    * @en Gets a registered protocol module (Sender + Receiver).
    */
-  public getProtocol<P extends SenderProtocol>(
+  public getProtocol<P extends HyperProtocolName>(
     protocol: P,
   ): HyperProtocol<unknown, unknown, unknown, unknown, P> | undefined {
     return this.registry.get(protocol);
@@ -369,7 +369,7 @@ export class HyperCore implements IHyperCore {
    * @ru Получает зарегистрированный сендер протокола.
    * @en Gets a registered protocol sender.
    */
-  public getSender<P extends SenderProtocol>(
+  public getSender<P extends HyperProtocolName>(
     protocol: P,
   ): HyperSender<unknown, unknown, unknown, unknown, P> | undefined {
     return this.registry.get(protocol)?.sender;
@@ -379,7 +379,7 @@ export class HyperCore implements IHyperCore {
    * @ru Получает зарегистрированный ресивер протокола.
    * @en Gets a registered protocol receiver.
    */
-  public getReceiver<P extends SenderProtocol>(
+  public getReceiver<P extends HyperProtocolName>(
     protocol: P,
   ): HyperReceiver<unknown, unknown, unknown, unknown, P> | undefined {
     return this.registry.get(protocol)?.receiver;
@@ -404,7 +404,7 @@ export class HyperCore implements IHyperCore {
    * @param protocol - The protocol to inspect.
    * @returns Sender constructor name.
    */
-  public async getSenderName(protocol: SenderProtocol = "rest"): Promise<string> {
+  public async getSenderName(protocol: HyperProtocolName = "rest"): Promise<string> {
     const resolved = await this.resolveRegisteredProtocol(protocol);
     const sender = resolved.sender;
     if (!sender) {
@@ -421,7 +421,7 @@ export class HyperCore implements IHyperCore {
    * @param protocol - The protocol to inspect.
    * @returns Receiver constructor name.
    */
-  public async getReceiverName(protocol: SenderProtocol = "rest"): Promise<string> {
+  public async getReceiverName(protocol: HyperProtocolName = "rest"): Promise<string> {
     const resolved = await this.resolveRegisteredProtocol(protocol);
     const receiver = resolved.receiver;
     if (!receiver) {
@@ -442,7 +442,7 @@ export class HyperCore implements IHyperCore {
    * @param protocol - The protocol to inspect.
    * @returns The protocol module display name.
    */
-  public async getProtocolName(protocol: SenderProtocol = "rest"): Promise<string> {
+  public async getProtocolName(protocol: HyperProtocolName = "rest"): Promise<string> {
     const resolved = await this.resolveRegisteredProtocol(protocol);
     if (resolved.name) return resolved.name;
     const ctor = resolved.constructor;
@@ -457,7 +457,7 @@ export class HyperCore implements IHyperCore {
    * @param protocol - The protocol module to register.
    * @returns This instance for chaining.
    */
-  public registerProtocol<P extends SenderProtocol>(protocol: AnyHyperProtocol<P>): this {
+  public registerProtocol<P extends HyperProtocolName>(protocol: AnyHyperProtocol<P>): this {
     this.assertActive();
     const protocolName = String(protocol.protocol);
     const namespaces = this as unknown as Record<string, unknown>;
@@ -535,7 +535,7 @@ export class HyperCore implements IHyperCore {
    * @param sender - The protocol sender to register.
    * @returns This instance for chaining.
    */
-  public registerSender<P extends SenderProtocol>(sender: AnyHyperSender<P>): this {
+  public registerSender<P extends HyperProtocolName>(sender: AnyHyperSender<P>): this {
     const existing = this.registry.get(sender.protocol);
     return this.registerProtocol({
       protocol: sender.protocol,
@@ -552,7 +552,7 @@ export class HyperCore implements IHyperCore {
    * @param receiver - The protocol receiver to register.
    * @returns This instance for chaining.
    */
-  public registerReceiver<P extends SenderProtocol>(receiver: AnyHyperReceiver<P>): this {
+  public registerReceiver<P extends HyperProtocolName>(receiver: AnyHyperReceiver<P>): this {
     const existing = this.registry.get(receiver.protocol);
     return this.registerProtocol({
       protocol: receiver.protocol,
@@ -569,7 +569,7 @@ export class HyperCore implements IHyperCore {
    * @param protocol - The protocol to expose lazily.
    * @returns A Proxy that dispatches method calls to the resolved protocol sender.
    */
-  private createLazyNamespace(protocol: SenderProtocol): Record<string, unknown> {
+  private createLazyNamespace(protocol: HyperProtocolName): Record<string, unknown> {
     const handler: ProxyHandler<Record<string, unknown>> = {
       get: (_target, name) => {
         if (typeof name !== "string" || name === "then") return undefined;
@@ -590,7 +590,7 @@ export class HyperCore implements IHyperCore {
    * @returns The result of the sender method call.
    */
   private async dispatchLazyMethod(
-    protocol: SenderProtocol,
+    protocol: HyperProtocolName,
     name: string,
     args: unknown[],
   ): Promise<unknown> {
@@ -619,10 +619,10 @@ export class HyperCore implements IHyperCore {
    * @param req - The universal request envelope.
    * @returns A promise resolving to the normalized universal response.
    */
-  public send<TOutput = unknown, P extends SenderProtocol = SenderProtocol>(
+  public send<TOutput = unknown, P extends HyperProtocolName = HyperProtocolName>(
     req: SendRequest<InferProtocolInput<P>, P>,
   ): Promise<UniversalResponse<TOutput>>;
-  public send<TInput = unknown, TOutput = unknown, P extends SenderProtocol = SenderProtocol>(
+  public send<TInput = unknown, TOutput = unknown, P extends HyperProtocolName = HyperProtocolName>(
     req: SendRequest<TInput, P>,
   ): Promise<UniversalResponse<TOutput>>;
   public async send<TInput = unknown, TOutput = unknown, P extends string = string>(
@@ -756,7 +756,7 @@ export class HyperCore implements IHyperCore {
     }
   }
 
-  private async resolveRegisteredProtocol<P extends SenderProtocol>(
+  private async resolveRegisteredProtocol<P extends HyperProtocolName>(
     protocol: P,
   ): Promise<AnyHyperProtocol<P>> {
     this.assertActive();
@@ -772,7 +772,7 @@ export class HyperCore implements IHyperCore {
   }
 
   private async resolveRequestSender(
-    protocol: SenderProtocol,
+    protocol: HyperProtocolName,
   ): Promise<HyperSender<any, any, any, any>> {
     const resolved = await this.resolveRegisteredProtocol(protocol);
 
@@ -848,7 +848,7 @@ export class HyperCore implements IHyperCore {
    * instance exactly once for the lifetime of this core.
    */
   private async acquireTransport(
-    protocol: SenderProtocol = "rest",
+    protocol: HyperProtocolName = "rest",
     requireListen = false,
   ): Promise<HyperTransport> {
     if (this.isDestroyed) {
@@ -887,7 +887,7 @@ export class HyperCore implements IHyperCore {
   }
 
   private async resolveAndRetainTransport(
-    protocol: SenderProtocol,
+    protocol: HyperProtocolName,
     requireListen = false,
   ): Promise<HyperTransport> {
     const transport =
@@ -916,7 +916,7 @@ export class HyperCore implements IHyperCore {
   }
 
   private retainResolvedTransport(
-    protocol: SenderProtocol,
+    protocol: HyperProtocolName,
     transport: HyperTransport,
     requireListen = false,
   ): HyperTransport {
@@ -961,7 +961,7 @@ export class HyperCore implements IHyperCore {
    * @param options - The server listen options.
    * @returns A promise resolving to the transport server handle.
    */
-  public async listen<P extends SenderProtocol = SenderProtocol>(
+  public async listen<P extends HyperProtocolName = HyperProtocolName>(
     options: HyperServerListenOptions<P>,
   ): Promise<TransportServer> {
     this.assertRunning();
@@ -974,7 +974,7 @@ export class HyperCore implements IHyperCore {
     }
   }
 
-  private async startListening<P extends SenderProtocol>(
+  private async startListening<P extends HyperProtocolName>(
     options: HyperServerListenOptions<P>,
   ): Promise<TransportServer> {
     const transport = await this.acquireTransport(options.protocol, true);
@@ -1074,6 +1074,7 @@ export class HyperCore implements IHyperCore {
       host: options.host,
       port: options.port,
       signal: options.signal,
+      signaling: options.signaling,
       onRequest,
     });
 

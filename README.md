@@ -1,3 +1,7 @@
+> Breaking change: REST is provided by `@hyperttp/protocol-rest`.
+> Register `RestProtocol` explicitly when using `HyperCore`; `hyperttp` registers it automatically.
+> REST classes and types are no longer exported by `@hyperttp/core` or `@hyperttp/core/rest`.
+
 # @hyperttp/core
 
 > Protocol-agnostic execution core for client and server communication.
@@ -22,9 +26,8 @@ batteries-included HTTP framework. It connects three independent extension point
   additionally listen for incoming requests.
 - **Plugins** add client policy and explicit server lifecycle hooks without expanding the core.
 
-The core owns dispatch, lifecycle, plugin execution and resource coordination. REST is included as
-the baseline protocol; additional protocols, optimized transports and higher-level behavior live in
-separate packages.
+The core owns dispatch, lifecycle, plugin execution and resource coordination. All protocol
+implementations, including REST, live in separate packages.
 
 ```text
 Application
@@ -80,8 +83,9 @@ WebRTC, MQTT or WebSocket. Protocol packages and transport packages serve differ
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
+import { RestProtocol } from "@hyperttp/protocol-rest";
 
-const core = new HyperCore();
+const core = new HyperCore({ protocols: [RestProtocol] });
 
 const response = await core.rest.get("https://example.com/users", {
   query: { page: 1 },
@@ -113,8 +117,9 @@ protocol:
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
+import { RestProtocol } from "@hyperttp/protocol-rest";
 
-const core = new HyperCore();
+const core = new HyperCore({ protocols: [RestProtocol] });
 
 const server = await core.listen({
   protocol: "rest",
@@ -144,11 +149,11 @@ and typed service injection belong to the high-level `hyperttp` package, not Cor
 
 ## Protocols
 
-REST is the only protocol implemented inside the core. External protocol modules are loaded lazily:
+REST is explicitly registered from its package. Other known optional modules can be loaded lazily:
 
 | Protocol  | Package                        | Namespace                    |
 | --------- | ------------------------------ | ---------------------------- |
-| REST      | built in                       | `core.rest`                  |
+| REST      | `@hyperttp/protocol-rest`                       | `core.rest`                  |
 | GraphQL   | `@hyperttp/protocol-graphql`   | `core.graphql`               |
 | gRPC      | `@hyperttp/protocol-grpc`      | `core.grpc`                  |
 | tRPC      | `@hyperttp/protocol-trpc`      | `core.trpc`                  |
@@ -249,6 +254,7 @@ A transport can also be supplied explicitly:
 
 ```ts
 import { HyperCore } from "@hyperttp/core";
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import { UndiciTransport } from "@hyperttp/transport-undici";
 
 const core = new HyperCore({
@@ -369,7 +375,7 @@ the peer. Transport write failures happen outside this hook boundary.
 Outbound auth/cache/retry are not automatically server authorization, server caching or
 response retries. A plugin must explicitly implement the relevant server hooks.
 
-## Built-in REST protocol
+## External REST protocol
 
 The REST package exposes client and server roles through `RestProtocol`.
 
@@ -407,7 +413,7 @@ policy; redirect support and credential handling depend on the selected transpor
 
 Core does not apply a client base URL; use absolute URLs with the built-in fetch transport.
 
-REST-specific public types are available from `@hyperttp/core/rest`.
+REST-specific public types are available from `@hyperttp/protocol-rest`.
 
 ## Lifecycle
 
@@ -437,7 +443,8 @@ await core.destroy();
 ## Error handling
 
 ```ts
-import { HyperClientError, TimeoutError } from "@hyperttp/core";
+import { HyperClientError } from "@hyperttp/core";
+import { TimeoutError } from "@hyperttp/protocol-rest";
 
 try {
   await core.rest.get("https://example.com/slow", { timeout: 1_000 });
@@ -458,7 +465,7 @@ The stable core is intentionally limited to:
 2. transport resolution, sharing and shutdown;
 3. client and server lifecycle orchestration;
 4. plugin execution;
-5. the baseline REST protocol and universal error contracts.
+5. protocol orchestration and universal error contracts.
 
 Feature growth should happen through plugins, protocol packages and transport packages. Keeping this
 boundary small makes runtime behavior predictable and allows the core API to stabilize independently

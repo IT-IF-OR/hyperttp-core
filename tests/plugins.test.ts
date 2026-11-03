@@ -1,3 +1,4 @@
+import { RestProtocol } from "@hyperttp/protocol-rest";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { HyperClientError, HyperCore } from "../src/index.js";
 import type { CorePluginFactory } from "../src/index.js";
@@ -48,7 +49,7 @@ describe("plugin factories and ownership", () => {
       instances.push(plugin);
       return plugin;
     });
-    const config: HyperClientOptions = { pluginFactories: [factory] };
+    const config: HyperClientOptions = { protocols: [RestProtocol], pluginFactories: [factory] };
     const first = new HyperCore(config, makeTransport());
     const second = new HyperCore(config, makeTransport());
     const extended = first.extend({});
@@ -94,8 +95,8 @@ describe("plugin factories and ownership", () => {
   it("allows explicitly shared stateless plugins across constructors and derived cores", async () => {
     const onRequest = vi.fn();
     const plugin: HyperPlugin = { name: "shared", shared: true, onRequest };
-    const first = new HyperCore({ plugins: [plugin] }, makeTransport());
-    const second = new HyperCore({ plugins: [plugin] }, makeTransport());
+    const first = new HyperCore({ protocols: [RestProtocol], plugins: [plugin] }, makeTransport());
+    const second = new HyperCore({ protocols: [RestProtocol], plugins: [plugin] }, makeTransport());
     const extended = first.extend({});
     const created = first.create({ customTransport: makeTransport() });
 
@@ -131,7 +132,7 @@ describe("plugin factories and ownership", () => {
     const onRequest = vi.fn();
     const plugin: HyperPlugin = { name: "once", setup, onRequest };
     const core = new HyperCore(
-      { plugins: [plugin, plugin], pluginFactories: [() => plugin] },
+      { protocols: [RestProtocol], plugins: [plugin, plugin], pluginFactories: [() => plugin] },
       makeTransport(),
     );
 

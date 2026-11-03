@@ -1,4 +1,4 @@
-import type { HyperTransport, LogLevel, SenderProtocol } from "@hyperttp/types";
+import type { HyperTransport, LogLevel, HyperProtocolName } from "@hyperttp/types";
 import { FetchTransport, type FetchTransportOptions } from "./fetch.js";
 import { dynamicImport, isModuleNotFoundError } from "../utils/modules.js";
 
@@ -39,7 +39,7 @@ type TransportDef = {
   readonly pkg: string;
   readonly export: string;
   /** Protocols that require this transport family. Omitted for generic transports. */
-  readonly protocols?: readonly SenderProtocol[];
+  readonly protocols?: readonly HyperProtocolName[];
 };
 
 const ALL_RUNTIMES: readonly Runtime[] = ["bun", "node", "deno", "browser"];
@@ -68,7 +68,7 @@ const TRANSPORT_DEFS: readonly TransportDef[] = [
   { runtime: ["deno"], pkg: "@hyperttp/transport-deno", export: "DenoTransport" },
 ];
 
-function getCandidates(protocol: SenderProtocol): readonly TransportDef[] {
+function getCandidates(protocol: HyperProtocolName): readonly TransportDef[] {
   return TRANSPORT_DEFS.filter(
     (transport) =>
       transport.runtime.includes(CURRENT_RUNTIME) &&
@@ -76,7 +76,7 @@ function getCandidates(protocol: SenderProtocol): readonly TransportDef[] {
   );
 }
 
-function getTransportInstallHint(protocol: SenderProtocol): string {
+function getTransportInstallHint(protocol: HyperProtocolName): string {
   const packages = new Set(
     getCandidates(protocol)
       .filter((transport) => transport.protocols?.includes(protocol))
@@ -88,15 +88,15 @@ function getTransportInstallHint(protocol: SenderProtocol): string {
 }
 
 type TransportCache = {
-  client: Map<SenderProtocol, HyperTransport>;
-  listen: Map<SenderProtocol, HyperTransport>;
-  clientResolutions: Map<SenderProtocol, Promise<HyperTransport>>;
-  listenResolutions: Map<SenderProtocol, Promise<HyperTransport>>;
+  client: Map<HyperProtocolName, HyperTransport>;
+  listen: Map<HyperProtocolName, HyperTransport>;
+  clientResolutions: Map<HyperProtocolName, Promise<HyperTransport>>;
+  listenResolutions: Map<HyperProtocolName, Promise<HyperTransport>>;
 };
 
 const defaultCacheKey = {};
 let transportCaches = new WeakMap<object, TransportCache>();
-let transportEntries = new WeakMap<HyperTransport, Set<Map<SenderProtocol, HyperTransport>>>();
+let transportEntries = new WeakMap<HyperTransport, Set<Map<HyperProtocolName, HyperTransport>>>();
 
 function getCache(config?: ResolveTransportOptions): TransportCache {
   const identity = config?.cacheKey ?? config ?? defaultCacheKey;
@@ -117,7 +117,7 @@ function supportsListen(transport: HyperTransport): boolean {
   return typeof transport.listen === "function";
 }
 
-function supportsProtocol(transport: HyperTransport, protocol: SenderProtocol): boolean {
+function supportsProtocol(transport: HyperTransport, protocol: HyperProtocolName): boolean {
   return typeof transport.supports === "function"
     ? transport.supports(protocol)
     : (transport.protocols?.includes(protocol) ?? true);
@@ -136,10 +136,18 @@ async function disposeUnusedTransport(transport: HyperTransport): Promise<void> 
 }
 
 async function createFetchTransport(
-  protocol: SenderProtocol,
+  protocol: HyperProtocolName,
   config?: ResolveTransportOptions,
 ): Promise<HyperTransport> {
-  const fetchTransport = new FetchTransport(config as unknown as FetchTransportOptions);
+  // Client config.protocols contains protocol modules, not transport identifiers.
+  const fetchTransport = new FetchTransport({
+    ...config,
+    protocols:
+      Array.isArray(config?.protocols) &&
+      config.protocols.every((value: unknown) => typeof value === "string")
+        ? config.protocols
+        : undefined,
+  } as FetchTransportOptions);
   if (supportsProtocol(fetchTransport, protocol)) return fetchTransport;
 
   await disposeUnusedTransport(fetchTransport);
@@ -149,7 +157,7 @@ async function createFetchTransport(
 }
 
 async function createTransport(
-  protocol: SenderProtocol,
+  protocol: HyperProtocolName,
   config?: ResolveTransportOptions,
 ): Promise<HyperTransport> {
   const candidates = getCandidates(protocol);
@@ -201,7 +209,7 @@ async function createTransport(
  * A custom transport from the config takes priority over auto-selection.
  */
 export async function resolveTransport(
-  protocol: SenderProtocol = "rest",
+  protocol: HyperProtocolName = "rest",
   config?: ResolveTransportOptions,
 ): Promise<HyperTransport> {
   const requireListen = config?.requireListen ?? false;
@@ -251,7 +259,7 @@ export async function resolveTransport(
  * @returns Кэшированный транспорт или `undefined`. @en Cached transport or `undefined`.
  */
 export function getCachedTransport(
-  protocol: SenderProtocol = "rest",
+  protocol: HyperProtocolName = "rest",
   config?: ResolveTransportOptions,
 ): HyperTransport | undefined {
   const cache = getCache(config);
