@@ -1,10 +1,10 @@
-import type { HyperTransport, LogLevel, SenderProtocol, TransportListenOptions, TransportRequest, TransportResponse, TransportServer } from "@hyperttp/types";
+import type { HyperTransport, LogLevel, HyperProtocolName, TransportListenOptions, TransportRequest, TransportResponse, TransportServer } from "@hyperttp/types";
 export interface FetchTransportOptions {
     /**
      * @ru Кастомный список поддерживаемых протоколов.
      * @en Custom list of supported protocols.
      */
-    protocols?: SenderProtocol[];
+    protocols?: HyperProtocolName[];
     /**
      * @ru Максимальный размер входящего серверного тела в байтах. Превышение
      * возвращает HTTP 413 до передачи тела обработчику.
@@ -26,7 +26,7 @@ export interface FetchTransportOptions {
  * packaged transport (@hyperttp/transport-undici/bun) is installed.
  */
 export declare class FetchTransport implements HyperTransport {
-    readonly protocols: readonly SenderProtocol[];
+    readonly protocols: readonly HyperProtocolName[];
     private readonly maxBodyBytes;
     private readonly onError?;
     private readonly logger?;

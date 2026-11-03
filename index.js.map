@@ -1,7 +1,7 @@
 {
   "version": 3,
   "sources": ["../src/index.ts"],
-  "sourcesContent": ["export { HyperCore } from \"./Core/index.js\";\nexport { HyperClientError, TimeoutError } from \"./utils/errors.js\";\nexport { deepMerge } from \"./utils/merge.js\";\nexport { RestProtocol, RestReceiver, RestSender } from \"./protocols/rest/index.js\";\nexport {\n  KNOWN_PROTOCOLS,\n  resetCachedProtocols,\n  resolveProtocol,\n  resolveReceiver,\n  resolveSender,\n} from \"./protocols/manager.js\";\n\nexport type { CorePluginFactory, ServerPluginContext, ServerRequestOutcome } from \"@hyperttp/types\";\n"],
-  "mappings": "aAAA,OAAS,cAAiB,kBAC1B,OAAS,iBAAkB,iBAAoB,oBAC/C,OAAS,cAAiB,mBAC1B,OAAS,aAAc,aAAc,eAAkB,4BACvD,OACE,gBACA,qBACA,gBACA,gBACA,kBACK",
-  "names": []
+  "sourcesContent": ["export { HyperCore } from \"./Core/index.js\";\nexport { HyperClientError, TimeoutError } from \"./utils/errors.js\";\nexport { deepMerge } from \"./utils/merge.js\";\nexport {\n  KNOWN_PROTOCOLS,\n  resetCachedProtocols,\n  resolveProtocol,\n  resolveReceiver,\n  resolveSender,\n} from \"./protocols/manager.js\";\n\nexport type { CorePluginFactory, ServerPluginContext, ServerRequestOutcome } from \"@hyperttp/types\";\n"],
+  "mappings": "AAAA,OAAS,aAAAA,MAAiB,kBAC1B,OAAS,oBAAAC,EAAkB,gBAAAC,MAAoB,oBAC/C,OAAS,aAAAC,MAAiB,mBAC1B,OACE,mBAAAC,EACA,wBAAAC,EACA,mBAAAC,EACA,mBAAAC,EACA,iBAAAC,MACK",
+  "names": ["HyperCore", "HyperClientError", "TimeoutError", "deepMerge", "KNOWN_PROTOCOLS", "resetCachedProtocols", "resolveProtocol", "resolveReceiver", "resolveSender"]
 }

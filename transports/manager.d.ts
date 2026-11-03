@@ -1,4 +1,4 @@
-import type { HyperTransport, LogLevel, SenderProtocol } from "@hyperttp/types";
+import type { HyperTransport, LogLevel, HyperProtocolName } from "@hyperttp/types";
 export type Runtime = "bun" | "node" | "deno" | "browser";
 /**
  * @ru Опции разрешения транспорта. `customTransport` имеет приоритет над автовыбором.
@@ -26,14 +26,14 @@ export declare const CURRENT_RUNTIME: Runtime;
  * @en Resolves optimal transport for the given protocol and current runtime.
  * A custom transport from the config takes priority over auto-selection.
  */
-export declare function resolveTransport(protocol?: SenderProtocol, config?: ResolveTransportOptions): Promise<HyperTransport>;
+export declare function resolveTransport(protocol?: HyperProtocolName, config?: ResolveTransportOptions): Promise<HyperTransport>;
 /**
  * @ru Синхронно возвращает транспорт из кэша без создания Promise.
  * @en Synchronously returns a cached transport without creating a Promise.
  * @param protocol - Протокол, для которого запрашивается транспорт. @en Protocol whose transport is requested.
  * @returns Кэшированный транспорт или `undefined`. @en Cached transport or `undefined`.
  */
-export declare function getCachedTransport(protocol?: SenderProtocol, config?: ResolveTransportOptions): HyperTransport | undefined;
+export declare function getCachedTransport(protocol?: HyperProtocolName, config?: ResolveTransportOptions): HyperTransport | undefined;
 /**
  * @ru Удаляет все записи кэша, ссылающиеся на указанный транспорт.
  * @en Removes every cache entry that references the given transport.

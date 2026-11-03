@@ -1,30 +1,28 @@
-import type { HyperProtocol, HyperReceiver, HyperSender, SenderProtocol } from "@hyperttp/types";
+import type { HyperProtocol, HyperReceiver, HyperSender, HyperProtocolName } from "@hyperttp/types";
 /**
- * @ru Известные протоколы ядра: встроенный rest и пакетные модули.
- * @en Known core protocols: the built-in rest and packaged modules.
+ * @ru Известные опциональные пакетные протоколы.
+ * @en Known optional packaged protocols.
  */
-export declare const KNOWN_PROTOCOLS: readonly SenderProtocol[];
+export declare const KNOWN_PROTOCOLS: readonly HyperProtocolName[];
 /**
- * @ru Разрешает модуль протокола. Встроенный rest возвращается статически,
- * остальные протоколы загружаются из пакетных модулей по требованию.
- * @en Resolves a protocol module. The built-in rest is returned statically,
- * other protocols are loaded from packaged modules on demand.
+ * @ru Разрешает опциональный пакетный модуль протокола.
+ * @en Resolves an optional packaged protocol module.
  */
-export declare function resolveProtocol<P extends SenderProtocol>(protocol: P, options?: {
+export declare function resolveProtocol<P extends HyperProtocolName>(protocol: P, options?: {
     [key: string]: unknown;
 }): Promise<HyperProtocol<unknown, unknown, unknown, unknown, P>>;
 /**
  * @ru Разрешает клиентский сендер протокола.
  * @en Resolves the client sender of a protocol.
  */
-export declare function resolveSender<P extends SenderProtocol>(protocol: P, options?: {
+export declare function resolveSender<P extends HyperProtocolName>(protocol: P, options?: {
     [key: string]: unknown;
 }): Promise<HyperSender<unknown, unknown, unknown, unknown, P>>;
 /**
  * @ru Разрешает серверный ресивер протокола.
  * @en Resolves the server receiver of a protocol.
  */
-export declare function resolveReceiver<P extends SenderProtocol>(protocol: P, options?: {
+export declare function resolveReceiver<P extends HyperProtocolName>(protocol: P, options?: {
     [key: string]: unknown;
 }): Promise<HyperReceiver<unknown, unknown, unknown, unknown, P>>;
 /**
