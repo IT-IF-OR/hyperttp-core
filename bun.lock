@@ -6,7 +6,7 @@
       "name": "@hyperttp/core",
       "devDependencies": {
         "@dirold2/dev-tools": "^1.1.3",
-        "@hyperttp/protocol-rest": "^0.1.1",
+        "@hyperttp/protocol-rest": "^0.1.2",
         "@hyperttp/types": "^0.5.4",
         "@types/node": "^26.6.6",
         "@vitest/coverage-v8": "^5.1.0",
@@ -93,7 +93,7 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
 
-    "@hyperttp/protocol-rest": ["@hyperttp/protocol-rest@0.1.1", "", { "peerDependencies": { "@hyperttp/types": "^0.5.3" } }, "sha512-GVL47kzAydcpchLzcwVQatEW0gvUy8BsUXDdguSIGYwvquaa0A4bMcKiH91HLwwZtj6/oZ4Oj0eCTu2AG0HPAg=="],
+    "@hyperttp/protocol-rest": ["@hyperttp/protocol-rest@0.1.2", "", { "peerDependencies": { "@hyperttp/types": "^0.5.4" } }, "sha512-H8wkf56qpSYA3cpHUYbgQcDqZa5inpiEmzMK20fiPeOkoCfN+LzBNxQEWkM5QHywwAzl293oztZtn6/rtRZxgg=="],
 
     "@hyperttp/types": ["@hyperttp/types@0.5.4", "", {}, "sha512-QJhvM7VPI2aX7b+0/mVucaUTn0QASokmbc7hBrpZvX4vx6aFLxJ4PYmBfgwCGzF3s8M9JZOtybMiTFRzV5ZN7w=="],
 
