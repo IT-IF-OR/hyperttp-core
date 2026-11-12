@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Core/index.ts"],
+  "sourcesContent": ["export { HyperCore } from \"./HyperCore.js\";\n"],
+  "mappings": "aAAA,OAAS,cAAiB",
+  "names": []
+}

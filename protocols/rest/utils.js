@@ -1,0 +1,2 @@
+"use strict";export const DEFAULT_STATUS_TEXTS={200:"OK",201:"Created",204:"No Content",400:"Bad Request",401:"Unauthorized",403:"Forbidden",404:"Not Found",500:"Internal Server Error"};export function getHeaderValue(e,o){const r=e[o]??e[o.toLowerCase()];if(r!==void 0)return Array.isArray(r)?r[0]:r;const a=o.toLowerCase();for(const n in e)if(n.toLowerCase()===a){const t=e[n];return Array.isArray(t)?t[0]:t}}
+//# sourceMappingURL=utils.js.map
