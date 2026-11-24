@@ -1,5 +1,18 @@
 # Changelog
 
+## [3.0.8] - 2026-11-24
+
+### Added
+
+- Declared dynamically resolved Bun, Deno, Node, Undici and WebRTC transports as optional peer dependencies, so isolated installations can supply only the transports they use.
+- Added published-artifact coverage for the Vite dynamic-import directive and a packed-tarball consumer test using pnpm's isolated linker.
+
+### Changed
+
+- Preserved `/* @vite-ignore */` while minifying the published Core artifact.
+- Removed stale WebSocket and MQTT transport resolver entries; no corresponding published transport packages exist.
+- Updated transport documentation to list the supported specialized WebRTC transport.
+
 ## [3.0.7] - 2026-11-24
 
 ### Added

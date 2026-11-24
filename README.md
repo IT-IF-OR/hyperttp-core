@@ -240,8 +240,7 @@ Runtime selection:
 | Deno           | `@hyperttp/transport-deno`   | built-in `FetchTransport` |
 | Browser / edge | custom transport             | built-in `FetchTransport` |
 
-WebRTC, WebSocket and MQTT first try their specialized `@hyperttp/transport-webrtc`,
-`@hyperttp/transport-websocket` and `@hyperttp/transport-mqtt` packages respectively.
+WebRTC first tries the specialized `@hyperttp/transport-webrtc` package.
 Every candidate is checked for protocol support; runtime selection does not imply universal support.
 
 Client and listen transport caches are separate and automatic transports are scoped by

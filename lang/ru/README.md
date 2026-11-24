@@ -241,8 +241,7 @@ interface HyperTransport {
 | Deno           | `@hyperttp/transport-deno`   | встроенный `FetchTransport` |
 | Browser / edge | custom transport             | встроенный `FetchTransport` |
 
-Для WebRTC, WebSocket и MQTT сначала проверяются специализированные пакеты
-`@hyperttp/transport-webrtc`, `@hyperttp/transport-websocket`, `@hyperttp/transport-mqtt`.
+Для WebRTC сначала проверяется специализированный пакет `@hyperttp/transport-webrtc`.
 У каждого кандидата проверяется поддержка протокола: выбор по runtime не означает
 поддержку любого протокола.
 

@@ -112,13 +112,12 @@ describe("resolveTransport automatic selection", () => {
     },
   );
 
-  it.each([
-    ["webrtc", "@hyperttp/transport-webrtc"],
-    ["websocket", "@hyperttp/transport-websocket"],
-    ["mqtt", "@hyperttp/transport-mqtt"],
-  ])("explains how to install the required %s transport", async (protocol, transportPackage) => {
-    await expect(resolveTransport(protocol)).rejects.toThrow(`Install "${transportPackage}"`);
-  });
+  it.each([["webrtc", "@hyperttp/transport-webrtc"]])(
+    "explains how to install the required %s transport",
+    async (protocol, transportPackage) => {
+      await expect(resolveTransport(protocol)).rejects.toThrow(`Install "${transportPackage}"`);
+    },
+  );
 
   it("defaults the protocol to REST when omitted", async () => {
     const transport = await resolveTransport();

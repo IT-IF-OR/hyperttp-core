@@ -12,6 +12,5 @@ export function isModuleNotFoundError(err: unknown): boolean {
 }
 
 export async function dynamicImport(pkg: string): Promise<Record<string, unknown>> {
-  /* @vite-ignore */
-  return import(/* webpackIgnore: true */ pkg);
+  return import(/* @vite-ignore */ pkg);
 }

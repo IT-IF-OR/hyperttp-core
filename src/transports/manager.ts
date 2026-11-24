@@ -75,18 +75,6 @@ const TRANSPORT_DEFS: readonly TransportDef[] = [
     export: "WebRtcTransport",
   },
   {
-    protocols: ["ws", "websocket"],
-    runtime: ALL_RUNTIMES,
-    pkg: "@hyperttp/transport-websocket",
-    export: "WebSocketTransport",
-  },
-  {
-    protocols: ["mqtt"],
-    runtime: ALL_RUNTIMES,
-    pkg: "@hyperttp/transport-mqtt",
-    export: "MqttTransport",
-  },
-  {
     protocols: ["grpc"],
     runtime: ["bun", "node", "deno"],
     pkg: "@hyperttp/transport-node",

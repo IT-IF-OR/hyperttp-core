@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "3.0.7",
+  "version": "3.0.8",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
@@ -54,11 +54,13 @@
     "format": "oxfmt src tests vitest.config.ts",
     "format:check": "oxfmt src tests vitest.config.ts --check",
     "test": "vitest run",
+    "test:artifact": "node scripts/check-vite-ignore.mjs",
+    "test:package": "node scripts/pack-consumer-e2e.mjs",
     "test:coverage": "vitest run --coverage",
     "dev": "tsx src/index.ts",
     "pub": "d-publish",
     "dist": "d-dist",
-    "build": "tsc && esbuild \"dist/**/*.js\" --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
+    "build": "tsc && esbuild \"dist/**/*.js\" --outdir=dist --allow-overwrite --minify-syntax --minify-identifiers --sourcemap && d-build",
     "clean": "node --input-type=module -e 'import { rmSync } from \"node:fs\"; rmSync(\"dist\", { recursive: true, force: true });'"
   },
   "devDependencies": {
@@ -76,7 +78,29 @@
     "vitest": "^5.1.1"
   },
   "peerDependencies": {
+    "@hyperttp/transport-bun": "^0.4.3",
+    "@hyperttp/transport-deno": "^0.1.3",
+    "@hyperttp/transport-node": "^0.1.2",
+    "@hyperttp/transport-undici": "^0.4.4",
+    "@hyperttp/transport-webrtc": "^0.4.6",
     "@hyperttp/types": "^0.5.5"
+  },
+  "peerDependenciesMeta": {
+    "@hyperttp/transport-bun": {
+      "optional": true
+    },
+    "@hyperttp/transport-deno": {
+      "optional": true
+    },
+    "@hyperttp/transport-node": {
+      "optional": true
+    },
+    "@hyperttp/transport-undici": {
+      "optional": true
+    },
+    "@hyperttp/transport-webrtc": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=20"

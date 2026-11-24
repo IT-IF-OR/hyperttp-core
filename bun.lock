@@ -19,8 +19,20 @@
         "vitest": "^5.1.1",
       },
       "peerDependencies": {
+        "@hyperttp/transport-bun": "^0.4.3",
+        "@hyperttp/transport-deno": "^0.1.3",
+        "@hyperttp/transport-node": "^0.1.2",
+        "@hyperttp/transport-undici": "^0.4.4",
+        "@hyperttp/transport-webrtc": "^0.4.6",
         "@hyperttp/types": "^0.5.5",
       },
+      "optionalPeers": [
+        "@hyperttp/transport-bun",
+        "@hyperttp/transport-deno",
+        "@hyperttp/transport-node",
+        "@hyperttp/transport-undici",
+        "@hyperttp/transport-webrtc",
+      ],
     },
   },
   "packages": {
