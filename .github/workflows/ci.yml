@@ -118,7 +118,7 @@ jobs:
 
       - name: Run Bun HTTP/2 transport-resolution test
         run: >-
-          bun --bun ./node_modules/vitest/vitest.mjs run tests/transport.test.ts
+          bun --bun ./node_modules/vitest/vitest.mjs run tests/transport.test.ts --pool=threads
           --testNamePattern "uses Node HTTP/2 for a shared REST and gRPC listener"
 
       - name: Run Bun built-package smoke test
