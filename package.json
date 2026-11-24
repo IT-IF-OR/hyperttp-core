@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "3.0.6",
+  "version": "3.0.7",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
@@ -63,19 +63,20 @@
   },
   "devDependencies": {
     "@dirold2/dev-tools": "^1.1.3",
-    "@hyperttp/types": "^0.5.4",
+    "@hyperttp/protocol-rest": "^0.1.3",
+    "@hyperttp/transport-node": "^0.1.2",
+    "@hyperttp/types": "^0.5.5",
     "@types/node": "^26.6.6",
-    "@vitest/coverage-v8": "^5.1.0",
+    "@vitest/coverage-v8": "^5.1.1",
     "esbuild": "^0.28.2",
-    "oxfmt": "^0.78.0",
-    "oxlint": "^1.93.0",
+    "oxfmt": "^0.80.0",
+    "oxlint": "^1.95.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0",
-    "@hyperttp/protocol-rest": "^0.1.2"
+    "vitest": "^5.1.1"
   },
   "peerDependencies": {
-    "@hyperttp/types": "^0.5.4"
+    "@hyperttp/types": "^0.5.5"
   },
   "engines": {
     "node": ">=20"

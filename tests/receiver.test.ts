@@ -11,7 +11,6 @@ import type {
   TransportServer,
 } from "@hyperttp/types";
 import type { RestServerResponse } from "@hyperttp/protocol-rest";
-import { FetchTransport } from "../src/transports/fetch.js";
 
 function makeRawRequest(overrides: Partial<TransportRequest> = {}): TransportRequest {
   return {
@@ -119,6 +118,45 @@ describe("HyperCore.listen (server role)", () => {
     await server.close();
     await core.destroy();
   });
+  it("serves REST and gRPC through one listener", async () => {
+    const transport = new MockServerTransport();
+    const restReceiver = {
+      protocol: "rest" as const,
+      receive: (request: TransportRequest) => request,
+      handle: () => ({ status: 204, headers: {}, body: undefined }),
+      respond: (response: TransportResponse) => response,
+    };
+    const grpcReceiver = {
+      protocol: "grpc" as const,
+      receive: (request: TransportRequest) => request,
+      handle: () => ({
+        status: 200,
+        headers: { "content-type": "application/grpc" },
+        trailers: { "grpc-status": "0" },
+        body: new Uint8Array(),
+      }),
+      respond: (response: TransportResponse) => response,
+    };
+    const core = new HyperCore(
+      {
+        protocols: [
+          { protocol: "rest", receiver: restReceiver },
+          { protocol: "grpc", receiver: grpcReceiver },
+        ],
+      },
+      transport,
+    );
+
+    await core.listen({ protocols: ["rest", "grpc"] });
+    expect(transport.onRequest).toBeDefined();
+
+    expect((await transport.onRequest!(makeRawRequest())).status).toBe(204);
+    const grpc = await transport.onRequest!(
+      makeRawRequest({ headers: { "content-type": "application/grpc" }, protocol: "rest" }),
+    );
+    expect(grpc.trailers?.["grpc-status"]).toBe("0");
+  });
+
   it("starts a server through the transport listen capability", async () => {
     const transport = new MockServerTransport();
     const core = new HyperCore({ protocols: [RestProtocol] }, transport);
@@ -210,7 +248,7 @@ describe("HyperCore.listen (server role)", () => {
     }
   });
 
-  it("uses FetchTransport for listen() when the client transport has no server role", async () => {
+  it("requires a listener-capable custom transport", async () => {
     const execute = vi.fn(async (req: TransportRequest) => ({
       status: 200,
       headers: {},
@@ -218,20 +256,16 @@ describe("HyperCore.listen (server role)", () => {
       body: undefined,
     }));
     const clientOnly = { execute, close: async () => {} };
-    const serverHandle = { close: vi.fn(async () => {}) };
-    const listen = vi.spyOn(FetchTransport.prototype, "listen").mockResolvedValue(serverHandle);
     const core = new HyperCore({ protocols: [RestProtocol] }, clientOnly as HyperTransport);
 
-    await expect(core.listen({ protocol: "rest" })).resolves.toEqual({
-      close: expect.any(Function),
-    });
-    expect(listen).toHaveBeenCalledOnce();
+    await expect(core.listen({ protocol: "rest" })).rejects.toThrow(
+      "Custom transport does not support listen()",
+    );
 
     await core.send({ protocol: "rest", input: { method: "GET", url: "/client" } });
     expect(execute).toHaveBeenCalledOnce();
 
     await core.destroy();
-    expect(serverHandle.close).toHaveBeenCalledOnce();
   });
 
   it("destroy closes active servers and the transport", async () => {

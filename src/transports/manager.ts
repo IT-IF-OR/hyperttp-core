@@ -1,5 +1,4 @@
 import type { HyperTransport, LogLevel, HyperProtocolName } from "@hyperttp/types";
-import { FetchTransport, type FetchTransportOptions } from "./fetch.js";
 import { dynamicImport, isModuleNotFoundError } from "../utils/modules.js";
 
 declare const Bun: unknown;
@@ -15,13 +14,10 @@ export interface ResolveTransportOptions {
   customTransport?: HyperTransport;
   /** Stable configuration identity for sharing automatic transports across calls. */
   cacheKey?: object;
-  /**
-   * @ru Требует серверную роль транспорта. При её отсутствии используется
-   * встроенный `FetchTransport`.
-   * @en Requires the transport server role. When unavailable, the built-in
-   * `FetchTransport` is used.
-   */
+  /** Requires the transport server role. */
   requireListen?: boolean;
+  /** Prefer an HTTP/2 transport for REST and gRPC when one is available. */
+  http2?: boolean;
   logger?: (level: LogLevel, message: string, meta?: unknown) => void;
   verbose?: boolean;
   [key: string]: unknown;
@@ -44,6 +40,33 @@ type TransportDef = {
 
 const ALL_RUNTIMES: readonly Runtime[] = ["bun", "node", "deno", "browser"];
 
+const HTTP2_TRANSPORT_DEFS: readonly TransportDef[] = [
+  {
+    protocols: ["rest"],
+    runtime: ["bun"],
+    pkg: "@hyperttp/transport-bun",
+    export: "BunTransport",
+  },
+  {
+    protocols: ["rest"],
+    runtime: ["node"],
+    pkg: "@hyperttp/transport-undici",
+    export: "UndiciTransport",
+  },
+  {
+    protocols: ["rest"],
+    runtime: ["deno"],
+    pkg: "@hyperttp/transport-deno",
+    export: "DenoTransport",
+  },
+  {
+    protocols: ["rest", "grpc"],
+    runtime: ["bun", "node", "deno"],
+    pkg: "@hyperttp/transport-node",
+    export: "Http2Transport",
+  },
+];
+
 const TRANSPORT_DEFS: readonly TransportDef[] = [
   {
     protocols: ["webrtc"],
@@ -63,7 +86,14 @@ const TRANSPORT_DEFS: readonly TransportDef[] = [
     pkg: "@hyperttp/transport-mqtt",
     export: "MqttTransport",
   },
+  {
+    protocols: ["grpc"],
+    runtime: ["bun", "node", "deno"],
+    pkg: "@hyperttp/transport-node",
+    export: "Http2Transport",
+  },
   { runtime: ["bun"], pkg: "@hyperttp/transport-bun", export: "BunTransport" },
+  { runtime: ["node"], pkg: "@hyperttp/transport-node", export: "FetchTransport" },
   { runtime: ["node"], pkg: "@hyperttp/transport-undici", export: "UndiciTransport" },
   { runtime: ["deno"], pkg: "@hyperttp/transport-deno", export: "DenoTransport" },
 ];
@@ -76,11 +106,40 @@ function getCandidates(protocol: HyperProtocolName): readonly TransportDef[] {
   );
 }
 
-function getTransportInstallHint(protocol: HyperProtocolName): string {
+function getCandidatesForProtocols(
+  protocols: readonly HyperProtocolName[],
+  config?: ResolveTransportOptions,
+): readonly TransportDef[] {
+  const preferred =
+    config?.http2 === true
+      ? HTTP2_TRANSPORT_DEFS.filter((transport) => {
+          const supportedProtocols = transport.protocols;
+          return (
+            transport.runtime.includes(CURRENT_RUNTIME) &&
+            (!supportedProtocols ||
+              protocols.some((protocol) => supportedProtocols.includes(protocol)))
+          );
+        })
+      : [];
+  const lists = protocols.map((protocol) => getCandidates(protocol));
+  // Start with the most constrained protocol so a dedicated transport such as
+  // GrpcTransport is tried before a generic REST transport.
+  lists.sort((a, b) => a.length - b.length);
+
+  const defs = new Map<string, TransportDef>();
+  for (const transport of [...preferred, ...lists.flat()]) {
+    const key = `${transport.pkg}:${transport.export}`;
+    if (!defs.has(key)) defs.set(key, transport);
+  }
+  return [...defs.values()];
+}
+
+function getTransportInstallHint(
+  protocols: readonly HyperProtocolName[],
+  config?: ResolveTransportOptions,
+): string {
   const packages = new Set(
-    getCandidates(protocol)
-      .filter((transport) => transport.protocols?.includes(protocol))
-      .map((transport) => transport.pkg),
+    getCandidatesForProtocols(protocols, config).map((transport) => transport.pkg),
   );
   if (packages.size === 0) return "";
 
@@ -88,15 +147,17 @@ function getTransportInstallHint(protocol: HyperProtocolName): string {
 }
 
 type TransportCache = {
-  client: Map<HyperProtocolName, HyperTransport>;
-  listen: Map<HyperProtocolName, HyperTransport>;
-  clientResolutions: Map<HyperProtocolName, Promise<HyperTransport>>;
-  listenResolutions: Map<HyperProtocolName, Promise<HyperTransport>>;
+  client: Map<string, HyperTransport>;
+  listen: Map<string, HyperTransport>;
+  multi: Map<string, HyperTransport>;
+  clientResolutions: Map<string, Promise<HyperTransport>>;
+  listenResolutions: Map<string, Promise<HyperTransport>>;
+  multiResolutions: Map<string, Promise<HyperTransport>>;
 };
 
 const defaultCacheKey = {};
 let transportCaches = new WeakMap<object, TransportCache>();
-let transportEntries = new WeakMap<HyperTransport, Set<Map<HyperProtocolName, HyperTransport>>>();
+let transportEntries = new WeakMap<HyperTransport, Set<Map<string, HyperTransport>>>();
 
 function getCache(config?: ResolveTransportOptions): TransportCache {
   const identity = config?.cacheKey ?? config ?? defaultCacheKey;
@@ -105,8 +166,10 @@ function getCache(config?: ResolveTransportOptions): TransportCache {
     cache = {
       client: new Map(),
       listen: new Map(),
+      multi: new Map(),
       clientResolutions: new Map(),
       listenResolutions: new Map(),
+      multiResolutions: new Map(),
     };
     transportCaches.set(identity, cache);
   }
@@ -123,6 +186,10 @@ function supportsProtocol(transport: HyperTransport, protocol: HyperProtocolName
     : (transport.protocols?.includes(protocol) ?? true);
 }
 
+function supportsAll(transport: HyperTransport, protocols: readonly HyperProtocolName[]): boolean {
+  return protocols.every((protocol) => supportsProtocol(transport, protocol));
+}
+
 async function disposeUnusedTransport(transport: HyperTransport): Promise<void> {
   try {
     if (typeof transport.destroy === "function") {
@@ -135,32 +202,11 @@ async function disposeUnusedTransport(transport: HyperTransport): Promise<void> 
   }
 }
 
-async function createFetchTransport(
-  protocol: HyperProtocolName,
-  config?: ResolveTransportOptions,
-): Promise<HyperTransport> {
-  // Client config.protocols contains protocol modules, not transport identifiers.
-  const fetchTransport = new FetchTransport({
-    ...config,
-    protocols:
-      Array.isArray(config?.protocols) &&
-      config.protocols.every((value: unknown) => typeof value === "string")
-        ? config.protocols
-        : undefined,
-  } as FetchTransportOptions);
-  if (supportsProtocol(fetchTransport, protocol)) return fetchTransport;
-
-  await disposeUnusedTransport(fetchTransport);
-  throw new Error(
-    `[HyperCore] No transport available for protocol "${protocol}" in runtime "${CURRENT_RUNTIME}".${getTransportInstallHint(protocol)}`,
-  );
-}
-
 async function createTransport(
-  protocol: HyperProtocolName,
+  protocols: readonly HyperProtocolName[],
   config?: ResolveTransportOptions,
 ): Promise<HyperTransport> {
-  const candidates = getCandidates(protocol);
+  const candidates = getCandidatesForProtocols(protocols, config);
   for (let i = 0; i < candidates.length; i++) {
     const t = candidates[i]!;
     let mod: Record<string, unknown>;
@@ -176,10 +222,7 @@ async function createTransport(
     if (typeof candidate !== "function") continue;
 
     const instance = new candidate(config ?? {});
-    if (
-      !supportsProtocol(instance, protocol) ||
-      (config?.requireListen && !supportsListen(instance))
-    ) {
+    if (!supportsAll(instance, protocols) || (config?.requireListen && !supportsListen(instance))) {
       await disposeUnusedTransport(instance);
       continue;
     }
@@ -187,19 +230,25 @@ async function createTransport(
     return instance;
   }
 
-  const fetchTransport = await createFetchTransport(protocol, config);
-  const message = `[HyperCore] Packaged transport unavailable or missing listen() for protocol "${protocol}" in runtime "${CURRENT_RUNTIME}". Falling back to FetchTransport.`;
-  try {
-    if (config?.logger) {
-      config.logger("warn", message);
-    } else if (config?.verbose) {
-      console.warn(message);
-    }
-  } catch (err) {
-    await disposeUnusedTransport(fetchTransport);
-    throw err;
+  const label = protocols.length === 1 ? "protocol" : "protocols";
+  throw new Error(
+    `[HyperCore] No transport available for ${label} ${protocols.map((p) => `"${p}"`).join(", ")} in runtime "${CURRENT_RUNTIME}".${getTransportInstallHint(protocols, config)}`,
+  );
+}
+
+function cacheTransport(
+  transport: HyperTransport,
+  cache: Map<string, HyperTransport>,
+  key: string,
+): HyperTransport {
+  cache.set(key, transport);
+  let entries = transportEntries.get(transport);
+  if (!entries) {
+    entries = new Set();
+    transportEntries.set(transport, entries);
   }
-  return fetchTransport;
+  entries.add(cache);
+  return transport;
 }
 
 /**
@@ -219,9 +268,10 @@ export async function resolveTransport(
       throw new Error(`[HyperCore] Custom transport does not support protocol "${protocol}".`);
     }
 
-    return requireListen && !supportsListen(config.customTransport)
-      ? createFetchTransport(protocol, config)
-      : config.customTransport;
+    if (requireListen && !supportsListen(config.customTransport)) {
+      throw new Error("[HyperCore] Custom transport does not support listen().");
+    }
+    return config.customTransport;
   }
 
   const cache = getCache(config);
@@ -233,22 +283,61 @@ export async function resolveTransport(
   const pending = transportResolutions.get(protocol);
   if (pending) return pending;
 
-  const resolution = createTransport(protocol, config)
-    .then((transport) => {
-      transportCache.set(protocol, transport);
-      let entries = transportEntries.get(transport);
-      if (!entries) {
-        entries = new Set();
-        transportEntries.set(transport, entries);
-      }
-      entries.add(transportCache);
-      return transport;
-    })
+  const resolution = createTransport([protocol], config)
+    .then((transport) => cacheTransport(transport, transportCache, protocol))
     .finally(() => {
       transportResolutions.delete(protocol);
     });
 
   transportResolutions.set(protocol, resolution);
+  return resolution;
+}
+
+/**
+ * @ru Разрешает один транспорт, поддерживающий сразу все указанные протоколы.
+ * Используется мультипротокольным `listen({ protocols })`, чтобы не открывать
+ * несколько слушателей на одном порту.
+ * @en Resolves one transport supporting every requested protocol. Used by the
+ * multi-protocol `listen({ protocols })` so one port is not opened multiple times.
+ */
+export async function resolveTransportForProtocols(
+  protocols: readonly HyperProtocolName[],
+  config?: ResolveTransportOptions,
+): Promise<HyperTransport> {
+  if (protocols.length === 0) {
+    throw new Error("[HyperCore] At least one protocol is required to resolve a transport.");
+  }
+  if (protocols.length === 1) return resolveTransport(protocols[0], config);
+
+  const requireListen = config?.requireListen ?? false;
+
+  if (config?.customTransport) {
+    if (!supportsAll(config.customTransport, protocols)) {
+      throw new Error(
+        `[HyperCore] Custom transport does not support protocols ${protocols.map((p) => `"${p}"`).join(", ")}.`,
+      );
+    }
+    if (requireListen && !supportsListen(config.customTransport)) {
+      throw new Error("[HyperCore] Custom transport does not support listen().");
+    }
+    return config.customTransport;
+  }
+
+  const cache = getCache(config);
+  const key = JSON.stringify([...protocols].sort());
+  const cached = cache.multi.get(key);
+  if (cached) return cached;
+
+  const pending = cache.multiResolutions.get(key);
+  if (pending) return pending;
+
+  const resolution = createTransport(protocols, config)
+    .then((transport) => cacheTransport(transport, cache.multi, key))
+    .finally(() => {
+      cache.multiResolutions.delete(key);
+    });
+
+  cache.multiResolutions.set(key, resolution);
   return resolution;
 }
 
@@ -273,8 +362,8 @@ export function getCachedTransport(
  */
 export function evictCachedTransport(transport: HyperTransport): void {
   for (const entries of transportEntries.get(transport) ?? []) {
-    for (const [protocol, cached] of entries) {
-      if (cached === transport) entries.delete(protocol);
+    for (const [key, cached] of entries) {
+      if (cached === transport) entries.delete(key);
     }
   }
   transportEntries.delete(transport);

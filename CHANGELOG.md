@@ -1,10 +1,20 @@
-## Unreleased — breaking
+# Changelog
 
+## [3.0.7] - 2026-11-24
+
+### Added
+
+- The core can start one server transport with multiple registered protocols.
+- Incoming requests are dispatched by the protocol selected by the transport.
 - Move REST sender, receiver and types into `@hyperttp/protocol-rest`.
 - Require explicit `RestProtocol` registration for direct `HyperCore` use.
 - Remove REST exports and the `@hyperttp/core/rest` entry point.
+- `http2: true` prefers Bun, Undici and Deno native REST transports; gRPC and shared REST + gRPC use `Http2Transport` from `@hyperttp/transport-node`.
+- Core no longer bundles a Node transport; direct `@hyperttp/core` users must install a transport package or pass `customTransport`.
 
-# Changelog
+### Changed
+
+- Moved the Node.js server transport implementation to `@hyperttp/transport-node`.
 
 ## [3.0.1] — 2026-11-03
 

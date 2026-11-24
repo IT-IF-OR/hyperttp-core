@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUN_VERSION: 1.4.4
+  BUN_VERSION: 1.4.5
 
 jobs:
   quality:
@@ -115,6 +115,11 @@ jobs:
 
       - name: Install dependencies
         run: bun install --ignore-scripts
+
+      - name: Run Bun HTTP/2 transport-resolution test
+        run: >-
+          bun --bun ./node_modules/vitest/vitest.mjs run tests/transport.test.ts
+          --testNamePattern "uses Node HTTP/2 for a shared REST and gRPC listener"
 
       - name: Run Bun built-package smoke test
         run: bun scripts/smoke-core.mjs

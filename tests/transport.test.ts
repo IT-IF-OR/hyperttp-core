@@ -6,13 +6,15 @@ import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HyperCore } from "../src/index.js";
 import {
+  CURRENT_RUNTIME,
   evictCachedTransport,
   getCachedTransport,
   resolveTransport,
+  resolveTransportForProtocols,
   resetCachedTransport,
 } from "../src/transports/manager.js";
 import * as modules from "../src/utils/modules.js";
-import { FetchTransport } from "../src/transports/fetch.js";
+import { FetchTransport } from "@hyperttp/transport-node";
 import type { HyperSender, HyperTransport, TransportRequest } from "@hyperttp/types";
 
 afterEach(() => {
@@ -31,10 +33,47 @@ function makeRequest(overrides: Partial<TransportRequest> = {}): TransportReques
   };
 }
 
-describe("resolveTransport fallback", () => {
-  it("falls back to the built-in FetchTransport when no packaged transport is installed", async () => {
-    const transport = await resolveTransport("rest");
-    expect(transport).toBeInstanceOf(FetchTransport);
+describe("resolveTransport automatic selection", () => {
+  it("explains how to install an optional transport when none is available", async () => {
+    vi.spyOn(modules, "dynamicImport").mockRejectedValue(
+      Object.assign(new Error("Cannot find module"), { code: "ERR_MODULE_NOT_FOUND" }),
+    );
+
+    await expect(resolveTransport("rest")).rejects.toThrow(
+      'Install "@hyperttp/transport-node" or "@hyperttp/transport-undici"',
+    );
+  });
+
+  it("prefers native HTTP/2 REST transports but retains the HTTP/2 transport for gRPC", async () => {
+    class MockUndiciTransport {
+      readonly protocols = ["rest"] as const;
+      execute = vi.fn();
+    }
+    class MockHttp2Transport {
+      readonly protocols = ["rest", "grpc"] as const;
+      execute = vi.fn();
+      listen = vi.fn();
+    }
+    vi.spyOn(modules, "dynamicImport").mockImplementation(async (pkg) => {
+      if (pkg === "@hyperttp/transport-undici") {
+        return { UndiciTransport: MockUndiciTransport };
+      }
+      if (pkg === "@hyperttp/transport-node") {
+        return { Http2Transport: MockHttp2Transport, GrpcTransport: MockHttp2Transport };
+      }
+      throw Object.assign(new Error(`Cannot find module "${pkg}"`), {
+        code: "ERR_MODULE_NOT_FOUND",
+      });
+    });
+
+    expect(await resolveTransport("rest", { http2: true })).toBeInstanceOf(MockUndiciTransport);
+    expect(await resolveTransport("rest", { http2: true, requireListen: true })).toBeInstanceOf(
+      MockHttp2Transport,
+    );
+    expect(await resolveTransport("grpc", { http2: true })).toBeInstanceOf(MockHttp2Transport);
+    expect(await resolveTransportForProtocols(["rest", "grpc"], { http2: true })).toBeInstanceOf(
+      MockHttp2Transport,
+    );
   });
 
   it("caches the resolved transport per protocol", async () => {
@@ -51,9 +90,27 @@ describe("resolveTransport fallback", () => {
     expect(second).not.toBe(first);
   });
 
-  it("throws for a protocol with no available transport", async () => {
-    await expect(resolveTransport("grpc")).rejects.toThrow(/No transport available/);
+  it("resolves the Node HTTP/2 transport for gRPC", async () => {
+    const transport = await resolveTransport("grpc");
+    expect(transport.protocols).toEqual(expect.arrayContaining(["grpc", "rest"]));
   });
+
+  it.runIf(CURRENT_RUNTIME === "bun")(
+    "uses Node HTTP/2 for a shared REST and gRPC listener",
+    async () => {
+      const transport = await resolveTransportForProtocols(["rest", "grpc"], {
+        http2: true,
+        requireListen: true,
+      });
+      try {
+        expect(transport.constructor.name).toBe("Http2Transport");
+        expect(transport.protocols).toEqual(expect.arrayContaining(["rest", "grpc"]));
+        expect(transport.listen).toBeTypeOf("function");
+      } finally {
+        await transport.destroy?.();
+      }
+    },
+  );
 
   it.each([
     ["webrtc", "@hyperttp/transport-webrtc"],
@@ -63,7 +120,7 @@ describe("resolveTransport fallback", () => {
     await expect(resolveTransport(protocol)).rejects.toThrow(`Install "${transportPackage}"`);
   });
 
-  it("defaults the protocol to http when omitted", async () => {
+  it("defaults the protocol to REST when omitted", async () => {
     const transport = await resolveTransport();
     expect(transport).toBeInstanceOf(FetchTransport);
     expect(transport.protocols).toContain("rest");
@@ -82,7 +139,7 @@ describe("resolveTransport fallback", () => {
     expect(transport).toBe(custom);
   });
 
-  it("uses FetchTransport for listen when a custom transport has no listen()", async () => {
+  it("throws when a custom transport lacks listen()", async () => {
     const clientOnly = {
       async execute(req: TransportRequest) {
         return { status: 200, headers: {}, url: req.url, body: undefined };
@@ -90,13 +147,11 @@ describe("resolveTransport fallback", () => {
     } as HyperTransport;
 
     const clientTransport = await resolveTransport("rest", { customTransport: clientOnly });
-    const serverTransport = await resolveTransport("rest", {
-      customTransport: clientOnly,
-      requireListen: true,
-    });
+    await expect(
+      resolveTransport("rest", { customTransport: clientOnly, requireListen: true }),
+    ).rejects.toThrow("Custom transport does not support listen()");
 
     expect(clientTransport).toBe(clientOnly);
-    expect(serverTransport).toBeInstanceOf(FetchTransport);
     expect(getCachedTransport("rest")).toBeUndefined();
   });
 
@@ -166,11 +221,13 @@ describe("transport cache isolation", () => {
     expect(await resolveTransport("rest")).not.toBe(custom);
   });
 
-  it("never publishes custom transports or their listen fallbacks to defaults", async () => {
+  it("never publishes custom transports to defaults", async () => {
     const automatic = await resolveTransport("rest");
     const custom = { execute: vi.fn() } as unknown as HyperTransport;
     expect(await resolveTransport("rest", { customTransport: custom })).toBe(custom);
-    await resolveTransport("rest", { customTransport: custom, requireListen: true });
+    await expect(
+      resolveTransport("rest", { customTransport: custom, requireListen: true }),
+    ).rejects.toThrow("Custom transport does not support listen()");
     expect(getCachedTransport("rest")).toBe(automatic);
     expect(getCachedTransport("rest", { requireListen: true })).toBeUndefined();
     expect(await resolveTransport("rest")).toBe(automatic);
@@ -239,30 +296,20 @@ describe("transport cache isolation", () => {
   it("separates client and listener roles from protocols containing role suffixes", async () => {
     class ClientTransport {
       execute = vi.fn();
+      listen = vi.fn();
     }
     vi.spyOn(modules, "dynamicImport").mockResolvedValue({ default: ClientTransport });
     const cacheKey = {};
     const listener = await resolveTransport("rest", { cacheKey, requireListen: true });
     const client = await resolveTransport("rest", { cacheKey });
     const suffixed = await resolveTransport("rest:listen", { cacheKey });
-    expect(listener).toBeInstanceOf(FetchTransport);
+    expect(listener).toBeInstanceOf(ClientTransport);
     expect(client).toBeInstanceOf(ClientTransport);
     expect(suffixed).toBeInstanceOf(ClientTransport);
     expect(suffixed).not.toBe(listener);
     expect(suffixed).not.toBe(client);
     expect(getCachedTransport("rest", { cacheKey, requireListen: true })).toBe(listener);
     expect(getCachedTransport("rest", { cacheKey })).toBe(client);
-  });
-
-  it("propagates logger errors and permits a retry", async () => {
-    const error = new Error("logger failed");
-    const logger = vi.fn((): void => {
-      throw error;
-    });
-    const config = { logger };
-    await expect(resolveTransport("rest", config)).rejects.toBe(error);
-    logger.mockImplementation(() => {});
-    await expect(resolveTransport("rest", config)).resolves.toBeInstanceOf(FetchTransport);
   });
 
   it("does not mistake constructor module-not-found errors for missing packages", async () => {

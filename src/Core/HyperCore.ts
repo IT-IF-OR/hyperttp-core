@@ -28,7 +28,11 @@ import type {
 import { dynamicImport } from "../utils/modules.js";
 import { defaultCoreConfig } from "../defaultConfig.js";
 import { KNOWN_PROTOCOLS, resolveProtocol } from "../protocols/manager.js";
-import { evictCachedTransport, resolveTransport } from "../transports/manager.js";
+import {
+  evictCachedTransport,
+  resolveTransport,
+  resolveTransportForProtocols,
+} from "../transports/manager.js";
 import { HyperClientError } from "../utils/errors.js";
 
 let requestCounter = 0;
@@ -170,6 +174,25 @@ function createServerRequestContext(raw: TransportRequest): ServerRequestContext
   return new DefaultRequestContext(raw.signal) as ServerRequestContext;
 }
 
+function getRequestHeader(
+  headers: Readonly<Record<string, string | string[]>>,
+  name: string,
+): string | undefined {
+  const value = headers[name] ?? headers[name.toLowerCase()];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function unsupportedProtocolResponse(protocols: readonly HyperProtocolName[]): TransportResponse {
+  return {
+    status: 415,
+    statusText: "Unsupported Media Type",
+    headers: { "content-type": "text/plain; charset=utf-8" },
+    body: new TextEncoder().encode(
+      `Unsupported protocol. Expected one of: ${protocols.join(", ")}.`,
+    ),
+  };
+}
+
 /**
  * @ru Проверяет, является ли значение UniversalResponse (а не SendRequest).
  * @en Checks whether the value is a UniversalResponse (rather than a SendRequest).
@@ -243,6 +266,7 @@ export class HyperCore implements IHyperCore {
   private readonly transports = new Map<HyperProtocolName, HyperTransport>();
   private readonly listenTransportPromises = new Map<HyperProtocolName, Promise<HyperTransport>>();
   private readonly listenTransports = new Map<HyperProtocolName, HyperTransport>();
+  private readonly multiListenTransportPromises = new Map<string, Promise<HyperTransport>>();
   private readonly retainedTransports = new Set<HyperTransport>();
   private readonly fixedTransport: HyperTransport | null;
   private destroyPromise: Promise<void> | null = null;
@@ -886,6 +910,93 @@ export class HyperCore implements IHyperCore {
     return transport;
   }
 
+  /**
+   * @ru Получает один транспорт, поддерживающий все запрошенные протоколы.
+   * Это позволяет открыть один listener на порт для REST и gRPC.
+   * @en Acquires one transport supporting every requested protocol. This lets
+   * REST and gRPC share a single listener on one port.
+   */
+  private async acquireListenTransport(
+    protocols: readonly HyperProtocolName[],
+  ): Promise<HyperTransport> {
+    if (this.isDestroyed) {
+      throw new HyperClientError(
+        "[HyperCore] Cannot acquire transport on a destroyed core instance.",
+      );
+    }
+
+    for (const transport of this.listenTransports.values()) {
+      if (this.transportSupportsAll(transport, protocols)) return transport;
+    }
+
+    const key = JSON.stringify([...protocols].sort());
+    let pending = this.multiListenTransportPromises.get(key);
+    if (!pending) {
+      let tracked!: Promise<HyperTransport>;
+      tracked = this.resolveListenTransport(protocols).finally(() => {
+        if (this.multiListenTransportPromises.get(key) === tracked) {
+          this.multiListenTransportPromises.delete(key);
+        }
+      });
+      this.multiListenTransportPromises.set(key, tracked);
+      pending = tracked;
+    }
+
+    return pending;
+  }
+
+  private async resolveListenTransport(
+    protocols: readonly HyperProtocolName[],
+  ): Promise<HyperTransport> {
+    const transport =
+      this.fixedTransport && typeof this.fixedTransport.listen === "function"
+        ? this.fixedTransport
+        : await resolveTransportForProtocols(protocols, {
+            ...this.config,
+            cacheKey: this.config,
+            customTransport: this.fixedTransport ?? this.config.customTransport,
+            requireListen: true,
+            logger: this.config.logger,
+            verbose: this.config.verbose,
+          });
+
+    if (!this.transportSupportsAll(transport, protocols)) {
+      throw new HyperClientError(
+        `[HyperCore] Transport "${transport.constructor.name}" does not support protocols ${protocols.map((protocol) => `"${protocol}"`).join(", ")}.`,
+      );
+    }
+
+    for (const protocol of protocols) {
+      this.retainResolvedTransport(protocol, transport, true);
+    }
+    return transport;
+  }
+
+  private transportSupportsAll(
+    transport: HyperTransport,
+    protocols: readonly HyperProtocolName[],
+  ): boolean {
+    return protocols.every((protocol) =>
+      typeof transport.supports === "function"
+        ? transport.supports(protocol)
+        : (transport.protocols?.includes(protocol) ?? true),
+    );
+  }
+
+  private routeServerRequest(
+    protocols: readonly HyperProtocolName[],
+    raw: TransportRequest,
+  ): HyperProtocolName | undefined {
+    const contentType = getRequestHeader(raw.headers, "content-type") ?? "";
+    if (contentType.startsWith("application/grpc") && protocols.includes("grpc")) {
+      return "grpc";
+    }
+    if (raw.protocol && protocols.includes(raw.protocol)) return raw.protocol;
+    if (protocols.length === 1) return protocols[0];
+    if (protocols.includes("rest")) return "rest";
+    return undefined;
+  }
+
   private async resolveAndRetainTransport(
     protocol: HyperProtocolName,
     requireListen = false,
@@ -977,7 +1088,19 @@ export class HyperCore implements IHyperCore {
   private async startListening<P extends HyperProtocolName>(
     options: HyperServerListenOptions<P>,
   ): Promise<TransportServer> {
-    const transport = await this.acquireTransport(options.protocol, true);
+    const requested = options.protocols?.length
+      ? options.protocols
+      : options.protocol
+        ? [options.protocol]
+        : [];
+    if (requested.length === 0) {
+      throw new HyperClientError(
+        "[HyperCore] listen() requires a protocol or a non-empty protocols array.",
+      );
+    }
+    const protocols = [...new Set(requested)];
+
+    const transport = await this.acquireListenTransport(protocols);
 
     if (typeof transport.listen !== "function") {
       throw new HyperClientError(
@@ -985,23 +1108,32 @@ export class HyperCore implements IHyperCore {
       );
     }
 
-    const resolved = await this.resolveRegisteredProtocol(options.protocol);
-
-    const receiver = resolved.receiver as
-      | HyperReceiver<unknown, unknown, TransportRequest, TransportResponse, P>
-      | undefined;
-    if (!receiver) {
-      throw new HyperClientError(
-        `[HyperCore] Protocol "${options.protocol}" has no receiver (server role).`,
-      );
+    const resolvedProtocols = await Promise.all(
+      protocols.map((protocol) => this.resolveRegisteredProtocol(protocol)),
+    );
+    const receivers = new Map<HyperProtocolName, AnyHyperReceiver>();
+    for (let i = 0; i < protocols.length; i++) {
+      const receiver = resolvedProtocols[i]?.receiver;
+      if (!receiver) {
+        throw new HyperClientError(
+          `[HyperCore] Protocol "${protocols[i]}" has no receiver (server role).`,
+        );
+      }
+      receivers.set(protocols[i]!, receiver);
     }
 
     const handler = options.handler as
       | ((request: unknown, ctx: ServerRequestContext) => unknown)
       | undefined;
+    const route = options.route;
 
     const onRequest = async (raw: TransportRequest): Promise<TransportResponse> => {
-      const ctx = Object.assign(createServerRequestContext(raw), { protocol: options.protocol });
+      const protocol = route?.(raw) ?? this.routeServerRequest(protocols, raw);
+      if (!protocol || !receivers.has(protocol)) {
+        return unsupportedProtocolResponse(protocols);
+      }
+      const receiver = receivers.get(protocol)!;
+      const ctx = Object.assign(createServerRequestContext(raw), { protocol });
       const plugins = this.plugins;
       let currentRequest = raw;
       let outcome: ServerRequestOutcome;
@@ -1232,11 +1364,13 @@ export class HyperCore implements IHyperCore {
     await Promise.allSettled([
       ...this.transportPromises.values(),
       ...this.listenTransportPromises.values(),
+      ...this.multiListenTransportPromises.values(),
     ]);
     this.transportPromises.clear();
     this.transports.clear();
     this.listenTransportPromises.clear();
     this.listenTransports.clear();
+    this.multiListenTransportPromises.clear();
 
     const transports = [...this.retainedTransports];
     this.retainedTransports.clear();
