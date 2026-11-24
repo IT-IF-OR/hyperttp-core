@@ -12,5 +12,15 @@ export function isModuleNotFoundError(err: unknown): boolean {
 }
 
 export async function dynamicImport(pkg: string): Promise<Record<string, unknown>> {
-  return import(/* @vite-ignore */ pkg);
+  try {
+    return await import(/* @vite-ignore */ pkg);
+  } catch (err) {
+    const message =
+      err && typeof err === "object" ? String((err as { message?: unknown }).message ?? "") : "";
+    if (!message.includes("Failed to load url")) throw err;
+
+    // Vite's SSR resolver cannot load arbitrary bare package specifiers.
+    // oxlint-disable-next-line no-eval -- The code is static; pkg stays lexical.
+    return eval("import(/* @vite-ignore */ pkg)");
+  }
 }

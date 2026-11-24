@@ -600,6 +600,18 @@ describe("HyperCore (universal core)", () => {
     expect(transport.close).toHaveBeenCalledTimes(1);
   });
 
+  it("does not pass core protocols to an auto-selected listener transport", async () => {
+    const webRtcProtocol = { ...RestProtocol, protocol: "webrtc" as const };
+    const core = new HyperCore({ protocols: [webRtcProtocol, RestProtocol] });
+
+    try {
+      const server = await core.listen({ protocol: "rest", port: 0 });
+      await server.close();
+    } finally {
+      await core.destroy();
+    }
+  });
+
   it("closes a server that resolves after destroy starts", async () => {
     let resolveListen!: (server: TransportServer) => void;
     const server = { close: vi.fn(async () => {}) };

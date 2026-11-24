@@ -948,11 +948,12 @@ export class HyperCore implements IHyperCore {
   private async resolveListenTransport(
     protocols: readonly HyperProtocolName[],
   ): Promise<HyperTransport> {
+    const { protocols: _, ...transportConfig } = this.config;
     const transport =
       this.fixedTransport && typeof this.fixedTransport.listen === "function"
         ? this.fixedTransport
         : await resolveTransportForProtocols(protocols, {
-            ...this.config,
+            ...transportConfig,
             cacheKey: this.config,
             customTransport: this.fixedTransport ?? this.config.customTransport,
             requireListen: true,

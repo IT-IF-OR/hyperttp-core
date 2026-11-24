@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.0.9] - 2026-11-24
+
+### Fixed
+
+- Fall back to a native dynamic import when Vite SSR rejects a dynamically resolved bare transport package.
+
 ## [3.0.8] - 2026-11-24
 
 ### Added

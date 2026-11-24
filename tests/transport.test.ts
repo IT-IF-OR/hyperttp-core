@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
+import { createServer } from "vite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HyperCore } from "../src/index.js";
 import {
@@ -42,6 +43,28 @@ describe("resolveTransport automatic selection", () => {
     await expect(resolveTransport("rest")).rejects.toThrow(
       'Install "@hyperttp/transport-node" or "@hyperttp/transport-undici"',
     );
+  });
+
+  it("keeps a native bare-package import fallback in Vite SSR", async () => {
+    const vite = await createServer({
+      appType: "custom",
+      configFile: false,
+      root: fileURLToPath(new URL("..", import.meta.url)),
+      server: { middlewareMode: true },
+    });
+
+    try {
+      const transformed = await vite.environments.ssr.transformRequest("/src/utils/modules.ts");
+      expect(transformed?.code).toContain("__vite_ssr_dynamic_import__");
+      expect(transformed?.code).toContain('eval("import(/* @vite-ignore */ pkg)")');
+
+      const { dynamicImport } = await vite.ssrLoadModule("/src/utils/modules.ts");
+      await expect(dynamicImport("@hyperttp/transport-node")).resolves.toMatchObject({
+        FetchTransport: expect.any(Function),
+      });
+    } finally {
+      await vite.close();
+    }
   });
 
   it("prefers native HTTP/2 REST transports but retains the HTTP/2 transport for gRPC", async () => {

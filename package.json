@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "3.0.8",
+  "version": "3.0.9",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
@@ -75,6 +75,7 @@
     "oxlint": "^1.95.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
+    "vite": "^8.3.8",
     "vitest": "^5.1.1"
   },
   "peerDependencies": {
