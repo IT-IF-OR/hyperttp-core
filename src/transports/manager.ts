@@ -81,9 +81,24 @@ const TRANSPORT_DEFS: readonly TransportDef[] = [
     export: "Http2Transport",
   },
   { runtime: ["bun"], pkg: "@hyperttp/transport-bun", export: "BunTransport" },
-  { runtime: ["node"], pkg: "@hyperttp/transport-node", export: "FetchTransport" },
+  {
+    runtime: ["bun"],
+    pkg: "@hyperttp/transport-node",
+    export: "FetchTransport",
+  },
   { runtime: ["node"], pkg: "@hyperttp/transport-undici", export: "UndiciTransport" },
+  { runtime: ["node"], pkg: "@hyperttp/transport-node", export: "FetchTransport" },
   { runtime: ["deno"], pkg: "@hyperttp/transport-deno", export: "DenoTransport" },
+  {
+    runtime: ["deno"],
+    pkg: "@hyperttp/transport-node",
+    export: "FetchTransport",
+  },
+  {
+    runtime: ["browser"],
+    pkg: "@hyperttp/transport-node/fetch",
+    export: "FetchTransport",
+  },
 ];
 
 function getCandidates(protocol: HyperProtocolName): readonly TransportDef[] {

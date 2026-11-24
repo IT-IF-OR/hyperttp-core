@@ -1,6 +1,6 @@
 {
   "name": "@hyperttp/core",
-  "version": "3.0.9",
+  "version": "3.1.0",
   "description": "Protocol-agnostic client/server execution core with pluggable protocols, transports and client policies",
   "keywords": [
     "browser",
@@ -68,7 +68,7 @@
     "@hyperttp/protocol-rest": "^0.1.3",
     "@hyperttp/transport-node": "^0.1.2",
     "@hyperttp/types": "^0.5.5",
-    "@types/node": "^26.6.6",
+    "@types/node": "^26.6.7",
     "@vitest/coverage-v8": "^5.1.1",
     "esbuild": "^0.28.2",
     "oxfmt": "^0.80.0",

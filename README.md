@@ -60,7 +60,7 @@ protocol packages. New I/O implementations should be transport packages.
 - Per-protocol transport resolution and coordinated transport ownership.
 - Blocking and background client plugin hooks, plus separate blocking server hooks.
 - Stable request contexts and final settlement callbacks for resource cleanup.
-- Runtime-aware transport selection with a browser-safe fetch fallback.
+- Runtime-aware selection of optional transport packages.
 - Strict TypeScript contracts and module augmentation for typed protocol namespaces.
 - No bundled runtime dependencies.
 
@@ -76,8 +76,10 @@ and `ServerRequestOutcome`. Use `HyperProtocolName` for protocol identifiers;
 `SenderProtocol` remains a deprecated compatibility alias.
 
 Optimized transports are optional. Select releases compatible with the current contracts.
-The built-in `FetchTransport` supports REST by default; it is not a universal fallback for
-WebRTC, MQTT or WebSocket. Protocol packages and transport packages serve different roles.
+For REST clients, Bun tries `@hyperttp/transport-bun` first and then the native-fetch
+`FetchTransport` from `@hyperttp/transport-node`; Node.js and Deno use their runtime-specific
+transport packages. Browser and edge applications use the browser-safe
+`@hyperttp/transport-node/fetch` fallback. Protocol packages and transport packages serve different roles.
 
 ## Client quick start
 
@@ -153,7 +155,7 @@ REST is explicitly registered from its package. Other known optional modules can
 
 | Protocol  | Package                        | Namespace                    |
 | --------- | ------------------------------ | ---------------------------- |
-| REST      | `@hyperttp/protocol-rest`                       | `core.rest`                  |
+| REST      | `@hyperttp/protocol-rest`      | `core.rest`                  |
 | GraphQL   | `@hyperttp/protocol-graphql`   | `core.graphql`               |
 | gRPC      | `@hyperttp/protocol-grpc`      | `core.grpc`                  |
 | tRPC      | `@hyperttp/protocol-trpc`      | `core.trpc`                  |
@@ -233,21 +235,22 @@ interface HyperTransport {
 
 Runtime selection:
 
-| Runtime        | Preferred package            | Fallback                  |
-| -------------- | ---------------------------- | ------------------------- |
-| Node.js        | `@hyperttp/transport-undici` | built-in `FetchTransport` |
-| Bun            | `@hyperttp/transport-bun`    | built-in `FetchTransport` |
-| Deno           | `@hyperttp/transport-deno`   | built-in `FetchTransport` |
-| Browser / edge | custom transport             | built-in `FetchTransport` |
+| Runtime        | First candidate              | REST fallback              |
+| -------------- | ---------------------------- | -------------------------- |
+| Node.js        | `@hyperttp/transport-undici` | `@hyperttp/transport-node` |
+| Bun            | `@hyperttp/transport-bun`    | `@hyperttp/transport-node` |
+| Deno           | `@hyperttp/transport-deno`   | `@hyperttp/transport-node` |
+| Browser / edge | custom transport             | `@hyperttp/transport-node/fetch` |
 
 WebRTC first tries the specialized `@hyperttp/transport-webrtc` package.
 Every candidate is checked for protocol support; runtime selection does not imply universal support.
 
 Client and listen transport caches are separate and automatic transports are scoped by
 configuration identity. A custom transport does not populate the default cache of other cores.
-If the selected REST client transport has no `listen()`, the built-in server fallback is used
-without replacing the client transport. That fallback uses dynamically loaded `node:http`:
-browser-safe client imports do not imply browser server listening support.
+The `@hyperttp/transport-node` `FetchTransport` supports REST client requests and Node.js
+`listen()`; Bun and Deno use it only after their runtime-specific transports are unavailable.
+Browser and edge runtimes use the `@hyperttp/transport-node/fetch` subpath, which keeps the
+Node.js server and HTTP/2 modules out of browser bundles.
 
 A transport can also be supplied explicitly:
 

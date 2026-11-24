@@ -35,13 +35,41 @@ function makeRequest(overrides: Partial<TransportRequest> = {}): TransportReques
 }
 
 describe("resolveTransport automatic selection", () => {
-  it("explains how to install an optional transport when none is available", async () => {
+  it("uses transport-node FetchTransport as the Bun REST fallback", async () => {
+    const dynamicImport = vi.spyOn(modules, "dynamicImport").mockImplementation(async (pkg) => {
+      if (pkg === "@hyperttp/transport-node") return { FetchTransport };
+      throw Object.assign(new Error(`Cannot find module "${pkg}"`), {
+        code: "ERR_MODULE_NOT_FOUND",
+      });
+    });
+    const fetchMock = vi.fn(
+      async () => new Response("fallback", { status: 200, headers: { "x-source": "native" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const transport = await resolveTransport("rest");
+    const response = await transport.execute(makeRequest());
+
+    expect(transport).toBeInstanceOf(FetchTransport);
+    expect(dynamicImport).toHaveBeenCalledWith("@hyperttp/transport-node");
+    if (CURRENT_RUNTIME === "bun") {
+      expect(dynamicImport).toHaveBeenNthCalledWith(1, "@hyperttp/transport-bun");
+    }
+    expect(response.status).toBe(200);
+    expect(new TextDecoder().decode(response.body as Uint8Array)).toBe("fallback");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://example.com/",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("still requires a packaged transport for REST listeners", async () => {
     vi.spyOn(modules, "dynamicImport").mockRejectedValue(
       Object.assign(new Error("Cannot find module"), { code: "ERR_MODULE_NOT_FOUND" }),
     );
 
-    await expect(resolveTransport("rest")).rejects.toThrow(
-      'Install "@hyperttp/transport-node" or "@hyperttp/transport-undici"',
+    await expect(resolveTransport("rest", { requireListen: true })).rejects.toThrow(
+      'Install "@hyperttp/transport-undici" or "@hyperttp/transport-node"',
     );
   });
 

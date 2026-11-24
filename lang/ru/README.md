@@ -60,7 +60,7 @@ observability и другие политики запросов должны б�
 - Разрешение транспортов по протоколу и координированное владение ими.
 - Блокирующие и фоновые клиентские hooks, отдельные блокирующие серверные hooks.
 - Стабильный request context и final settlement для освобождения ресурсов.
-- Выбор транспорта по runtime с browser-safe fetch fallback.
+- Выбор опциональных пакетов транспорта с учётом runtime.
 - Строгие TypeScript-контракты и module augmentation для типизированных namespace протоколов.
 - Отсутствие встроенных runtime-зависимостей.
 
@@ -76,8 +76,10 @@ npm install @hyperttp/core @hyperttp/types
 `SenderProtocol` сохранён как deprecated alias для совместимости.
 
 Оптимизированные транспорты опциональны; выбирайте версии, совместимые с текущими контрактами.
-Встроенный `FetchTransport` по умолчанию поддерживает REST, а не произвольные протоколы.
-Пакеты протоколов и транспортов решают разные задачи.
+Для REST-клиента Bun сначала проверяет `@hyperttp/transport-bun`, а затем использует
+нативный `fetch` через `FetchTransport` из `@hyperttp/transport-node`. Node.js и Deno используют
+свои runtime-пакеты транспорта; браузер и edge-среды используют browser-safe fallback
+`@hyperttp/transport-node/fetch`. Пакеты протоколов и транспортов решают разные задачи.
 
 ## Быстрый старт клиента
 
@@ -154,7 +156,7 @@ REST регистрируется явно из отдельного пакет�
 
 | Протокол  | Пакет                          | Namespace                    |
 | --------- | ------------------------------ | ---------------------------- |
-| REST      | `@hyperttp/protocol-rest`                        | `core.rest`                  |
+| REST      | `@hyperttp/protocol-rest`      | `core.rest`                  |
 | GraphQL   | `@hyperttp/protocol-graphql`   | `core.graphql`               |
 | gRPC      | `@hyperttp/protocol-grpc`      | `core.grpc`                  |
 | tRPC      | `@hyperttp/protocol-trpc`      | `core.trpc`                  |
@@ -234,22 +236,22 @@ interface HyperTransport {
 
 Выбор по runtime:
 
-| Runtime        | Предпочтительный пакет       | Fallback                    |
-| -------------- | ---------------------------- | --------------------------- |
-| Node.js        | `@hyperttp/transport-undici` | встроенный `FetchTransport` |
-| Bun            | `@hyperttp/transport-bun`    | встроенный `FetchTransport` |
-| Deno           | `@hyperttp/transport-deno`   | встроенный `FetchTransport` |
-| Browser / edge | custom transport             | встроенный `FetchTransport` |
+| Runtime        | Первый кандидат              | REST fallback                |
+| -------------- | ---------------------------- | ---------------------------- |
+| Node.js        | `@hyperttp/transport-undici` | `@hyperttp/transport-node`   |
+| Bun            | `@hyperttp/transport-bun`    | `@hyperttp/transport-node`   |
+| Deno           | `@hyperttp/transport-deno`   | `@hyperttp/transport-node`   |
+| Browser / edge | custom transport             | `@hyperttp/transport-node/fetch` |
 
 Для WebRTC сначала проверяется специализированный пакет `@hyperttp/transport-webrtc`.
 У каждого кандидата проверяется поддержка протокола: выбор по runtime не означает
 поддержку любого протокола.
 
 Client/listen caches разделены; автоматические транспорты изолированы по identity конфигурации.
-Custom transport не попадает в default cache независимых ядер. Если REST-транспорт клиента
-не имеет `listen()`, сервер использует встроенный fallback, не заменяя клиентский транспорт.
-Серверный fallback динамически загружает `node:http`: browser-safe импорт не означает
-возможность открыть сервер в браузере.
+Custom transport не попадает в default cache независимых ядер. `FetchTransport` из
+`@hyperttp/transport-node` поддерживает REST-клиент и `listen()` в Node.js; Bun и Deno используют его
+только если их runtime-транспорты недоступны. Браузер и edge-среды используют subpath
+`@hyperttp/transport-node/fetch`, который не затягивает Node.js server и HTTP/2-модули в browser bundle.
 
 Транспорт можно передать явно:
 
