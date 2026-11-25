@@ -14,8 +14,9 @@ import {
   resolveTransportForProtocols,
   resetCachedTransport,
 } from "../src/transports/manager.js";
+import { isModuleNotFoundError } from "../src/utils/modules.js";
 import * as modules from "../src/utils/modules.js";
-import { FetchTransport } from "@hyperttp/transport-node";
+import { FetchTransport, Http2Transport } from "@hyperttp/transport-node";
 import type { HyperSender, HyperTransport, TransportRequest } from "@hyperttp/types";
 
 afterEach(() => {
@@ -23,6 +24,23 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+function createModuleNotFoundError(specifier: string): Error {
+  return Object.assign(
+    new Error(`Cannot find package '${specifier}' imported from '/test/importer.js'`),
+    { code: "ERR_MODULE_NOT_FOUND" },
+  );
+}
+
+function mockMissingUndiciTransport(): void {
+  const actualDynamicImport = modules.dynamicImport;
+  vi.spyOn(modules, "dynamicImport").mockImplementation(async (specifier) => {
+    if (specifier === "@hyperttp/transport-undici") {
+      throw createModuleNotFoundError(specifier);
+    }
+    return actualDynamicImport(specifier);
+  });
+}
 
 function makeRequest(overrides: Partial<TransportRequest> = {}): TransportRequest {
   return {
@@ -33,6 +51,30 @@ function makeRequest(overrides: Partial<TransportRequest> = {}): TransportReques
     ...overrides,
   };
 }
+
+describe("isModuleNotFoundError", () => {
+  it("recognizes the requested missing package", () => {
+    expect(
+      isModuleNotFoundError(
+        createModuleNotFoundError("@hyperttp/transport-bun"),
+        "@hyperttp/transport-bun",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not swallow missing internal dependencies", () => {
+    expect(
+      isModuleNotFoundError(
+        createModuleNotFoundError("some-internal-dependency"),
+        "@hyperttp/transport-bun",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not recognize generic errors", () => {
+    expect(isModuleNotFoundError(new Error("missing"), "@hyperttp/transport-bun")).toBe(false);
+  });
+});
 
 describe("resolveTransport automatic selection", () => {
   it("uses transport-node FetchTransport as the Bun REST fallback", async () => {
@@ -64,12 +106,22 @@ describe("resolveTransport automatic selection", () => {
   });
 
   it("still requires a packaged transport for REST listeners", async () => {
-    vi.spyOn(modules, "dynamicImport").mockRejectedValue(
-      Object.assign(new Error("Cannot find module"), { code: "ERR_MODULE_NOT_FOUND" }),
-    );
+    const dynamicImport = vi.spyOn(modules, "dynamicImport");
+    vi.mocked(dynamicImport).mockImplementation(async (specifier) => {
+      throw createModuleNotFoundError(specifier);
+    });
+
+    const transportPackage =
+      CURRENT_RUNTIME === "bun"
+        ? "@hyperttp/transport-bun"
+        : CURRENT_RUNTIME === "deno"
+          ? "@hyperttp/transport-deno"
+          : CURRENT_RUNTIME === "browser"
+            ? "@hyperttp/transport-node/fetch"
+            : "@hyperttp/transport-undici";
 
     await expect(resolveTransport("rest", { requireListen: true })).rejects.toThrow(
-      'Install "@hyperttp/transport-undici" or "@hyperttp/transport-node"',
+      `Install "${transportPackage}" or "@hyperttp/transport-node"`,
     );
   });
 
@@ -83,10 +135,12 @@ describe("resolveTransport automatic selection", () => {
 
     try {
       const transformed = await vite.environments.ssr.transformRequest("/src/utils/modules.ts");
+
       expect(transformed?.code).toContain("__vite_ssr_dynamic_import__");
       expect(transformed?.code).toContain('eval("import(/* @vite-ignore */ pkg)")');
 
       const { dynamicImport } = await vite.ssrLoadModule("/src/utils/modules.ts");
+
       await expect(dynamicImport("@hyperttp/transport-node")).resolves.toMatchObject({
         FetchTransport: expect.any(Function),
       });
@@ -117,7 +171,7 @@ describe("resolveTransport automatic selection", () => {
       });
     });
 
-    expect(await resolveTransport("rest", { http2: true })).toBeInstanceOf(MockUndiciTransport);
+    expect(await resolveTransport("rest", { http2: true })).toBeInstanceOf(MockHttp2Transport);
     expect(await resolveTransport("rest", { http2: true, requireListen: true })).toBeInstanceOf(
       MockHttp2Transport,
     );
@@ -133,7 +187,8 @@ describe("resolveTransport automatic selection", () => {
     expect(second).toBe(first);
   });
 
-  it("returns a fresh instance after resetCachedTransport", async () => {
+  it("returns a fresh FetchTransport after resetCachedTransport when Undici is unavailable", async () => {
+    mockMissingUndiciTransport();
     const first = await resolveTransport("rest");
     resetCachedTransport();
     const second = await resolveTransport("rest");
@@ -147,15 +202,19 @@ describe("resolveTransport automatic selection", () => {
   });
 
   it.runIf(CURRENT_RUNTIME === "bun")(
-    "uses Node HTTP/2 for a shared REST and gRPC listener",
+    "selects Node HTTP/2 for a shared REST and gRPC listener",
     async () => {
       const transport = await resolveTransportForProtocols(["rest", "grpc"], {
         http2: true,
         requireListen: true,
       });
+
       try {
-        expect(transport.constructor.name).toBe("Http2Transport");
+        expect(transport).toBeInstanceOf(Http2Transport);
+
         expect(transport.protocols).toEqual(expect.arrayContaining(["rest", "grpc"]));
+
+        expect(transport.execute).toBeTypeOf("function");
         expect(transport.listen).toBeTypeOf("function");
       } finally {
         await transport.destroy?.();
@@ -170,7 +229,8 @@ describe("resolveTransport automatic selection", () => {
     },
   );
 
-  it("defaults the protocol to REST when omitted", async () => {
+  it("defaults the protocol to REST with FetchTransport when Undici is unavailable", async () => {
+    mockMissingUndiciTransport();
     const transport = await resolveTransport();
     expect(transport).toBeInstanceOf(FetchTransport);
     expect(transport.protocols).toContain("rest");
@@ -216,7 +276,8 @@ describe("resolveTransport automatic selection", () => {
     expect(await resolveTransport("rest", config)).not.toBe(first);
   });
 
-  it("keeps an automatically resolved transport alive for an extended core", async () => {
+  it("keeps an automatically resolved FetchTransport alive for an extended core", async () => {
+    mockMissingUndiciTransport();
     const parent = new HyperCore();
     await parent.getTransportName();
     const close = vi.spyOn(FetchTransport.prototype, "close");

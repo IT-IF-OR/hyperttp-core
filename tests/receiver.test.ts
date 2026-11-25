@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HyperCore } from "../src/index.js";
 import { RestProtocol, RestReceiver, RestSender } from "@hyperttp/protocol-rest";
+import * as modules from "../src/utils/modules.js";
 import { resetCachedProtocols, resolveReceiver } from "../src/protocols/manager.js";
 import type {
   HyperTransport,
@@ -11,6 +12,13 @@ import type {
   TransportServer,
 } from "@hyperttp/types";
 import type { RestServerResponse } from "@hyperttp/protocol-rest";
+
+function createModuleNotFoundError(specifier: string): Error {
+  return Object.assign(
+    new Error(`Cannot find package '${specifier}' imported from '/test/importer.js'`),
+    { code: "ERR_MODULE_NOT_FOUND" },
+  );
+}
 
 function makeRawRequest(overrides: Partial<TransportRequest> = {}): TransportRequest {
   return {
@@ -53,6 +61,7 @@ class MockServerTransport implements HyperTransport {
 
 afterEach(() => {
   resetCachedProtocols();
+  vi.restoreAllMocks();
 });
 
 describe("receiver manager", () => {
@@ -60,7 +69,11 @@ describe("receiver manager", () => {
     await expect(resolveReceiver("rest")).rejects.toThrow(/No protocol available for "rest"/);
   });
 
-  it("throws for a packaged protocol receiver that is not installed", async () => {
+  it("throws for a packaged protocol receiver when its package is unavailable", async () => {
+    vi.spyOn(modules, "dynamicImport").mockImplementation(async (specifier) => {
+      throw createModuleNotFoundError(specifier);
+    });
+
     await expect(resolveReceiver("grpc")).rejects.toThrow(
       /No protocol available for "grpc".*@hyperttp\/protocol-grpc/,
     );

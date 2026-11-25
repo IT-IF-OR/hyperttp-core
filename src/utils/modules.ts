@@ -1,13 +1,16 @@
-export function isModuleNotFoundError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as Record<string, unknown>;
-  if (e.code === "ERR_MODULE_NOT_FOUND" || e.code === "MODULE_NOT_FOUND") return true;
+const MODULE_NOT_FOUND_CODES = new Set(["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND"]);
 
-  const message = err instanceof Error ? err.message : String(e.message ?? "");
-  return (
-    message.includes("Cannot find module") ||
-    message.includes("Failed to resolve") ||
-    message.includes("Failed to load")
+export function isModuleNotFoundError(err: unknown, specifier: string): boolean {
+  if (!err || typeof err !== "object") return false;
+
+  const error = err as { code?: unknown; message?: unknown };
+  const message = typeof error.message === "string" ? error.message : "";
+  const knownCode = typeof error.code === "string" && MODULE_NOT_FOUND_CODES.has(error.code);
+
+  if (!knownCode || !message.includes(specifier)) return false;
+
+  return /Cannot find (?:module|package)|Module not found|Failed to resolve|Failed to load|__vite-optional-peer-dep/i.test(
+    message,
   );
 }
 
@@ -17,10 +20,11 @@ export async function dynamicImport(pkg: string): Promise<Record<string, unknown
   } catch (err) {
     const message =
       err && typeof err === "object" ? String((err as { message?: unknown }).message ?? "") : "";
+
     if (!message.includes("Failed to load url")) throw err;
 
-    // Vite's SSR resolver cannot load arbitrary bare package specifiers.
-    // oxlint-disable-next-line no-eval -- The code is static; pkg stays lexical.
+    // Vite SSR cannot resolve arbitrary bare package specifiers.
+    // oxlint-disable-next-line no-eval -- pkg remains a lexical variable.
     return eval("import(/* @vite-ignore */ pkg)");
   }
 }

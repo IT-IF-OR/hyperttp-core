@@ -5,30 +5,47 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("uses the browser-safe transport-node fetch subpath for REST", async () => {
-  vi.stubGlobal("process", undefined);
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => new Response("fallback", { status: 200 })),
-  );
+const isBunRuntime =
+  typeof (globalThis as typeof globalThis & { Bun?: unknown }).Bun !== "undefined";
 
-  const manager = await import("../src/transports/manager.js");
-  expect(manager.CURRENT_RUNTIME).toBe("browser");
+it.skipIf(isBunRuntime)(
+  "resolves the browser-safe FetchTransport when server runtime globals are absent",
+  async () => {
+    vi.resetModules();
 
-  const transport = await manager.resolveTransport("rest");
-  const response = await transport.execute({
-    method: "GET",
-    url: "https://example.com/",
-    headers: {},
-    protocol: "rest",
-  });
+    vi.stubGlobal("Deno", undefined);
+    vi.stubGlobal("process", undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("fallback", { status: 200 })),
+    );
 
-  expect(transport.constructor.name).toBe("FetchTransport");
-  expect(response.status).toBe(200);
-  expect(fetch).toHaveBeenCalledWith(
-    "https://example.com/",
-    expect.objectContaining({ method: "GET" }),
-  );
+    let manager: typeof import("../src/transports/manager.js") | undefined;
 
-  manager.resetCachedTransport();
-});
+    try {
+      manager = await import("../src/transports/manager.js");
+
+      expect(manager.CURRENT_RUNTIME).toBe("browser");
+
+      const transport = await manager.resolveTransport("rest");
+      const response = await transport.execute({
+        method: "GET",
+        url: "https://example.com/",
+        headers: {},
+        protocol: "rest",
+      });
+
+      expect(transport.constructor.name).toBe("FetchTransport");
+      expect(response.status).toBe(200);
+
+      expect(fetch).toHaveBeenCalledWith(
+        "https://example.com/",
+        expect.objectContaining({ method: "GET" }),
+      );
+    } finally {
+      manager?.resetCachedTransport();
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  },
+);

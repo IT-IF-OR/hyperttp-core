@@ -235,11 +235,11 @@ interface HyperTransport {
 
 Runtime selection:
 
-| Runtime        | First candidate              | REST fallback              |
-| -------------- | ---------------------------- | -------------------------- |
-| Node.js        | `@hyperttp/transport-undici` | `@hyperttp/transport-node` |
-| Bun            | `@hyperttp/transport-bun`    | `@hyperttp/transport-node` |
-| Deno           | `@hyperttp/transport-deno`   | `@hyperttp/transport-node` |
+| Runtime        | First candidate              | REST fallback                    |
+| -------------- | ---------------------------- | -------------------------------- |
+| Node.js        | `@hyperttp/transport-undici` | `@hyperttp/transport-node`       |
+| Bun            | `@hyperttp/transport-bun`    | `@hyperttp/transport-node`       |
+| Deno           | `@hyperttp/transport-deno`   | `@hyperttp/transport-node`       |
 | Browser / edge | custom transport             | `@hyperttp/transport-node/fetch` |
 
 WebRTC first tries the specialized `@hyperttp/transport-webrtc` package.

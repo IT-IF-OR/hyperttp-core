@@ -42,6 +42,12 @@ const ALL_RUNTIMES: readonly Runtime[] = ["bun", "node", "deno", "browser"];
 
 const HTTP2_TRANSPORT_DEFS: readonly TransportDef[] = [
   {
+    protocols: ["rest", "grpc"],
+    runtime: ["bun", "node", "deno"],
+    pkg: "@hyperttp/transport-node",
+    export: "Http2Transport",
+  },
+  {
     protocols: ["rest"],
     runtime: ["bun"],
     pkg: "@hyperttp/transport-bun",
@@ -58,12 +64,6 @@ const HTTP2_TRANSPORT_DEFS: readonly TransportDef[] = [
     runtime: ["deno"],
     pkg: "@hyperttp/transport-deno",
     export: "DenoTransport",
-  },
-  {
-    protocols: ["rest", "grpc"],
-    runtime: ["bun", "node", "deno"],
-    pkg: "@hyperttp/transport-node",
-    export: "Http2Transport",
   },
 ];
 
@@ -216,7 +216,7 @@ async function createTransport(
     try {
       mod = await dynamicImport(t.pkg);
     } catch (err) {
-      if (!isModuleNotFoundError(err)) throw err;
+      if (!isModuleNotFoundError(err, t.pkg)) throw err;
       continue;
     }
     const candidate = (mod[t.export] ?? mod.default) as
@@ -228,6 +228,17 @@ async function createTransport(
     if (!supportsAll(instance, protocols) || (config?.requireListen && !supportsListen(instance))) {
       await disposeUnusedTransport(instance);
       continue;
+    }
+
+    if (config?.logger) {
+      config.logger(
+        "debug",
+        `[HyperCore] Selected transport "${instance.constructor.name}" for ${protocols.map((protocol) => `"${protocol}"`).join(", ")}.`,
+      );
+    } else if (config?.verbose) {
+      console.debug(
+        `[HyperCore] Selected transport "${instance.constructor.name}" for ${protocols.map((protocol) => `"${protocol}"`).join(", ")}.`,
+      );
     }
 
     return instance;
@@ -347,14 +358,20 @@ export async function resolveTransportForProtocols(
 /**
  * @ru Синхронно возвращает транспорт из кэша без создания Promise.
  * @en Synchronously returns a cached transport without creating a Promise.
- * @param protocol - Протокол, для которого запрашивается транспорт. @en Protocol whose transport is requested.
+ * @param protocols - Протокол или набор протоколов, для которых запрашивается транспорт. @en Protocol or protocol set to look up.
  * @returns Кэшированный транспорт или `undefined`. @en Cached transport or `undefined`.
  */
 export function getCachedTransport(
-  protocol: HyperProtocolName = "rest",
+  protocols: HyperProtocolName | readonly HyperProtocolName[] = "rest",
   config?: ResolveTransportOptions,
 ): HyperTransport | undefined {
   const cache = getCache(config);
+  if (Array.isArray(protocols) && protocols.length > 1) {
+    return cache.multi.get(JSON.stringify([...protocols].sort()));
+  }
+
+  const protocol = Array.isArray(protocols) ? protocols[0] : protocols;
+  if (!protocol) return undefined;
   return (config?.requireListen ? cache.listen : cache.client).get(protocol);
 }
 

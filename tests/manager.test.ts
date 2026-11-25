@@ -9,6 +9,13 @@ import {
 import { HyperCore } from "../src/index.js";
 import * as modules from "../src/utils/modules.js";
 
+function createModuleNotFoundError(specifier: string): Error {
+  return Object.assign(
+    new Error(`Cannot find package '${specifier}' imported from '/test/importer.js'`),
+    { code: "ERR_MODULE_NOT_FOUND" },
+  );
+}
+
 function deferredModule() {
   let resolve!: (module: Record<string, unknown>) => void;
   let reject!: (error: unknown) => void;
@@ -71,7 +78,11 @@ describe("protocol manager", () => {
     expect(loader).toHaveBeenCalledExactlyOnceWith("@hyperttp/protocol-grpc");
   });
 
-  it("throws for a packaged protocol sender that is not installed", async () => {
+  it("throws for a packaged protocol sender when its package is unavailable", async () => {
+    vi.spyOn(modules, "dynamicImport").mockImplementation(async (specifier) => {
+      throw createModuleNotFoundError(specifier);
+    });
+
     await expect(resolveSender("grpc")).rejects.toThrow(
       /No protocol available for "grpc".*@hyperttp\/protocol-grpc/,
     );
@@ -157,7 +168,9 @@ describe("protocol manager", () => {
     const instance = { protocol: "grpc" };
     const loader = vi
       .spyOn(modules, "dynamicImport")
-      .mockRejectedValueOnce(Object.assign(new Error("missing"), { code: "ERR_MODULE_NOT_FOUND" }))
+      .mockImplementationOnce(async (specifier) => {
+        throw createModuleNotFoundError(specifier);
+      })
       .mockResolvedValueOnce({ default: {} })
       .mockResolvedValueOnce({ default: instance });
     await expect(resolveProtocol("grpc")).rejects.toThrow(/No protocol available.*protocol-grpc/);

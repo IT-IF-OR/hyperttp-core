@@ -236,11 +236,11 @@ interface HyperTransport {
 
 Выбор по runtime:
 
-| Runtime        | Первый кандидат              | REST fallback                |
-| -------------- | ---------------------------- | ---------------------------- |
-| Node.js        | `@hyperttp/transport-undici` | `@hyperttp/transport-node`   |
-| Bun            | `@hyperttp/transport-bun`    | `@hyperttp/transport-node`   |
-| Deno           | `@hyperttp/transport-deno`   | `@hyperttp/transport-node`   |
+| Runtime        | Первый кандидат              | REST fallback                    |
+| -------------- | ---------------------------- | -------------------------------- |
+| Node.js        | `@hyperttp/transport-undici` | `@hyperttp/transport-node`       |
+| Bun            | `@hyperttp/transport-bun`    | `@hyperttp/transport-node`       |
+| Deno           | `@hyperttp/transport-deno`   | `@hyperttp/transport-node`       |
 | Browser / edge | custom transport             | `@hyperttp/transport-node/fetch` |
 
 Для WebRTC сначала проверяется специализированный пакет `@hyperttp/transport-webrtc`.

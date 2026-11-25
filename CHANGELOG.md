@@ -1,5 +1,36 @@
 # Changelog
 
+## [3.1.1] - 2026-11-26
+
+### Added
+
+- Added debug logging for each successfully auto-selected transport when a resolver logger or verbose mode is configured.
+- Added synchronous multi-protocol transport cache lookup through `getCachedTransport(["rest", "grpc"], config)`.
+- Added real REST transport-manager and shared HTTP/2 REST + gRPC end-to-end coverage.
+
+### Fixed
+
+- Only treat an import failure as an absent optional package when it identifies the requested package, preserving errors from missing dependencies inside an installed transport or protocol package.
+- Made transport and protocol absence tests use realistic Node module-not-found errors rather than depend on which optional packages happen to be installed.
+- Made browser transport tests isolate runtime detection safely and skip simulations that cannot override Bun's immutable global.
+
+### Changed
+
+- Prefer `Http2Transport` from `@hyperttp/transport-node` when `http2: true` is explicitly requested for REST, gRPC, or a shared REST + gRPC listener.
+- Made REST transport-install hints and their tests runtime-aware.
+
+## [3.1.0] - 2026-11-24
+
+### Added
+
+- Added runtime-aware REST transport candidates: Bun and Deno fall back to `@hyperttp/transport-node`, while browser and edge builds use its browser-safe `/fetch` subpath.
+- Added browser-bundle coverage for the browser-safe REST transport subpath.
+
+### Changed
+
+- Reworked transport documentation around optional transport packages and their runtime-specific selection order.
+- Node REST transport selection now tries `@hyperttp/transport-undici` before `@hyperttp/transport-node`.
+
 ## [3.0.9] - 2026-11-24
 
 ### Fixed

@@ -100,7 +100,7 @@ async function loadProtocol(
 
       return instance;
     } catch (err) {
-      if (!isModuleNotFoundError(err)) throw err;
+      if (!isModuleNotFoundError(err, def.pkg)) throw err;
     }
   }
 
