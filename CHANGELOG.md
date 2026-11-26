@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.1.2] - 2026-11-26
+
+### Performance
+
+- Optimized client request execution by inlining the sender pipeline and removing the redundant `runSender()` async wrapper.
+- Added a client hook fast path for plugins that do not define `onRequest`, `onResponse`, or `onError`.
+- Made `hookRequests` allocation lazy. The map is now created only when an `onRequest` hook replaces the request.
+- Optimized request tracking for plugin hooks with linear-time backfilling, preserving the request context observed by each hook.
+- Replaced the active request `Set<Promise<void>>` with a lightweight counter and a shared drain promise.
+- Made request ID generation lazy, generating an ID only when `requestId` is first accessed.
+- Made settlement callback storage lazy, avoiding unnecessary array and Promise allocations when no callbacks are registered.
+- Optimized sender resolution by using synchronous registry lookups for already registered protocols.
+
+### Internal
+
+- Added guards for optional server plugin hooks to avoid unnecessary property calls and async execution.
+- Preserved request transformation, response hook, error recovery, and settlement ordering while optimizing the execution pipeline.
+
 ## [3.1.1] - 2026-11-26
 
 ### Added

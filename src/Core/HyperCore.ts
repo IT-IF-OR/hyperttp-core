@@ -61,7 +61,7 @@ function createRequestId(): string {
   if (requestCounter === 0) {
     requestIdBase = Date.now().toString(36) + "-";
   }
-  return requestIdBase + (requestCounter >>> 0).toString(36);
+  return requestIdBase + requestCounter.toString(36);
 }
 
 /**
@@ -99,18 +99,24 @@ function releaseTransport(transport: HyperTransport): number {
  * @returns A new RequestContext.
  */
 class DefaultRequestContext implements RequestContext {
-  public readonly requestId = createRequestId();
+  private _requestId?: string;
+  get requestId(): string {
+    return (this._requestId ??= createRequestId());
+  }
   public readonly startTime = performance.now();
   public readonly signal?: AbortSignal;
   private requestMeta?: Record<string, unknown>;
   private requestState?: Record<string, unknown>;
-  private settlementCallbacks: ((outcome: RequestOutcome) => void | Promise<void>)[] = [];
+  private settlementCallbacks?: ((outcome: RequestOutcome) => void | Promise<void>)[];
   private finalized = false;
   private acceptedResponse?: UniversalResponse;
 
   public onSettled(callback: (outcome: RequestOutcome) => void | Promise<void>): void {
-    if (this.finalized) throw new Error("[HyperCore] Request settlement has already started.");
-    this.settlementCallbacks.push(callback);
+    if (this.finalized) {
+      throw new Error("[HyperCore] Request settlement has already started.");
+    }
+
+    (this.settlementCallbacks ??= []).push(callback);
   }
 
   public acceptFinalResponse<T>(response: UniversalResponse<T>): UniversalResponse<T> {
@@ -123,11 +129,32 @@ class DefaultRequestContext implements RequestContext {
     return this.acceptedResponse === response;
   }
 
-  public async settle(outcome: RequestOutcome, report: (error: unknown) => void): Promise<void> {
+  public settle(
+    ok: boolean,
+    value: unknown,
+    report: (error: unknown) => void,
+  ): Promise<void> | void {
     if (this.finalized) return;
+
     this.finalized = true;
+
     const callbacks = this.settlementCallbacks;
-    this.settlementCallbacks = [];
+    this.settlementCallbacks = undefined;
+
+    if (!callbacks?.length) return;
+
+    const outcome: RequestOutcome = ok
+      ? { ok: true, response: value as UniversalResponse }
+      : { ok: false, error: value };
+
+    return this.runSettlementCallbacks(callbacks, outcome, report);
+  }
+
+  private async runSettlementCallbacks(
+    callbacks: ((outcome: RequestOutcome) => void | Promise<void>)[],
+    outcome: RequestOutcome,
+    report: (error: unknown) => void,
+  ): Promise<void> {
     for (const callback of callbacks) {
       try {
         await callback(outcome);
@@ -156,10 +183,6 @@ class DefaultRequestContext implements RequestContext {
   public set state(value: Record<string, unknown>) {
     this.requestState = value;
   }
-}
-
-function createRequestContext(req: SendRequest<unknown, string>): DefaultRequestContext {
-  return new DefaultRequestContext(req.signal);
 }
 
 /**
@@ -207,6 +230,36 @@ function isUniversalResponse(value: unknown): value is UniversalResponse {
     "status" in value &&
     !("input" in value)
   );
+}
+
+/**
+ * @ru Проверяет, нужен ли плагинам клиентский hook-конвейер.
+ * @en Checks whether any plugin needs the client hook pipeline.
+ * @param plugins - The registered plugins.
+ * @returns True when at least one plugin declares a client-side hook.
+ */
+function hasClientHooks(plugins: readonly HyperPlugin[]): boolean {
+  for (let i = 0; i < plugins.length; i++) {
+    const plugin = plugins[i]!;
+    if (
+      typeof plugin.onRequest === "function" ||
+      typeof plugin.onResponse === "function" ||
+      typeof plugin.onError === "function"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * @ru Проверяет, вернул ли парсер промис, чтобы не платить микрозадачей за синхронный результат.
+ * @en Checks whether the parser returned a promise, avoiding a microtask for synchronous results.
+ * @param value - The parser result.
+ * @returns True when the value is thenable.
+ */
+function isThenable<T>(value: T | Promise<T>): value is Promise<T> {
+  return typeof (value as Promise<T> | null | undefined)?.then === "function";
 }
 
 /**
@@ -271,7 +324,11 @@ export class HyperCore implements IHyperCore {
   private readonly fixedTransport: HyperTransport | null;
   private destroyPromise: Promise<void> | null = null;
   private state: "initializing" | "running" | "destroying" | "destroyed" = "initializing";
-  private readonly activeRequests = new Set<Promise<void>>();
+  private activeRequestCount = 0;
+  private resolveActiveRequestsDrained?: () => void;
+  private readonly reportSettlementError = (error: unknown): void => {
+    this.log("error", "[HyperCore] Settlement callback failed", error);
+  };
 
   private get isDestroyed(): boolean {
     return this.state === "destroying" || this.state === "destroyed";
@@ -653,26 +710,58 @@ export class HyperCore implements IHyperCore {
     req: SendRequest<TInput, P>,
   ): Promise<UniversalResponse<TOutput>> {
     this.assertRunning();
-    let complete!: () => void;
-    const completion = new Promise<void>((resolve) => {
-      complete = resolve;
-    });
-    this.activeRequests.add(completion);
-    const ctx = createRequestContext(req as SendRequest<unknown, string>);
+
+    const ctx = new DefaultRequestContext(req.signal);
+    this.activeRequestCount++;
+
     try {
-      const response = await this.executeRequest<TInput, TOutput, P>(req, ctx);
-      await ctx.settle({ ok: true, response }, (error) =>
-        this.log("error", "[HyperCore] Settlement callback failed", error),
-      );
+      const plugins = this.plugins;
+      // Inlined fast path: without client hooks the request bypasses the plugin
+      // pipeline, so there is no reason to pay for another async frame.
+      const sender = hasClientHooks(plugins)
+        ? undefined
+        : (this.registry.get(req.protocol)?.sender as HyperSender<any, any, any, any> | undefined);
+
+      let response: UniversalResponse<TOutput>;
+
+      if (sender) {
+        this.assertActive();
+
+        const transport =
+          this.transports.get(req.protocol) ?? (await this.acquireTransport(req.protocol));
+
+        const prepared = sender.prepare(req, ctx);
+        const raw = await sender.send(prepared, transport, ctx);
+
+        const parsed = sender.parse(raw, ctx);
+        response = isThenable(parsed) ? await parsed : parsed;
+      } else {
+        response = await this.executeRequest<TInput, TOutput, P>(req, ctx);
+      }
+
+      const settlement = ctx.settle(true, response, this.reportSettlementError);
+
+      if (settlement !== undefined) {
+        await settlement;
+      }
+
       return response;
     } catch (error) {
-      await ctx.settle({ ok: false, error }, (diagnostic) =>
-        this.log("error", "[HyperCore] Settlement callback failed", diagnostic),
-      );
+      const settlement = ctx.settle(false, error, this.reportSettlementError);
+
+      if (settlement !== undefined) {
+        await settlement;
+      }
+
       throw error;
     } finally {
-      complete();
-      this.activeRequests.delete(completion);
+      this.activeRequestCount--;
+
+      if (this.activeRequestCount === 0) {
+        const resolve = this.resolveActiveRequestsDrained;
+        this.resolveActiveRequestsDrained = undefined;
+        resolve?.();
+      }
     }
   }
 
@@ -681,26 +770,23 @@ export class HyperCore implements IHyperCore {
     ctx: DefaultRequestContext,
   ): Promise<UniversalResponse<TOutput>> {
     const plugins = this.plugins;
-    let currentReq = req as SendRequest<any, any>;
-    const hookRequests = new Map<HyperPlugin, SendRequest<any, any>>();
-    let responseHooksStarted = false;
 
-    if (plugins.length === 0) {
-      const sender = this.registry.get(req.protocol)?.sender;
-      if (sender) {
-        return this.runSender<TInput, TOutput>(sender, req as SendRequest<TInput, string>, ctx);
-      }
-    }
+    let currentReq = req as SendRequest<any, any>;
+    // Allocated only when a plugin actually replaces the request.
+    let hookRequests: Map<HyperPlugin, SendRequest<any, any>> | undefined;
+    let recordedHooksEnd = 0;
+    let responseHooksStarted = false;
 
     try {
       let response: UniversalResponse<TOutput> | undefined;
 
       for (let i = 0; i < plugins.length; i++) {
         const plugin = plugins[i]!;
+
         if (typeof plugin.onRequest !== "function") continue;
 
-        hookRequests.set(plugin, currentReq);
         const result = await plugin.onRequest(currentReq, this.pluginCtx, ctx);
+
         if (result == null) continue;
 
         if (isUniversalResponse(result)) {
@@ -708,29 +794,67 @@ export class HyperCore implements IHyperCore {
           break;
         }
 
+        if (result !== currentReq) {
+          hookRequests ??= new Map();
+
+          // Record the request every earlier hook actually saw.
+          for (let j = recordedHooksEnd; j <= i; j++) {
+            const recorded = plugins[j]!;
+            if (typeof recorded.onRequest === "function") {
+              hookRequests.set(recorded, currentReq);
+            }
+          }
+
+          recordedHooksEnd = i + 1;
+        }
+
         currentReq = result as SendRequest<any, any>;
         (ctx as { signal?: AbortSignal }).signal = currentReq.signal;
       }
 
       if (!response) {
-        const sender = await this.resolveRequestSender(currentReq.protocol);
-        response = await this.runSender<unknown, TOutput>(sender, currentReq, ctx);
+        const registeredSender = this.registry.get(currentReq.protocol)?.sender;
+
+        const sender = (registeredSender ??
+          (await this.resolveRequestSender(currentReq.protocol))) as HyperSender<
+          any,
+          any,
+          any,
+          any
+        >;
+
+        this.assertActive();
+
+        const transport =
+          this.transports.get(currentReq.protocol) ??
+          (await this.acquireTransport(currentReq.protocol));
+
+        const prepared = sender.prepare(currentReq, ctx);
+        const raw = await sender.send(prepared, transport, ctx);
+
+        const parsed = sender.parse(raw, ctx);
+        response = isThenable(parsed) ? await parsed : parsed;
       }
 
       if (ctx.isFinalResponse(response)) return response;
+
       responseHooksStarted = true;
+
       return await this.runResponseHooks(response, currentReq, ctx, plugins, hookRequests);
     } catch (err) {
       let recovery: UniversalResponse<TOutput> | undefined;
+
       for (const plugin of plugins) {
         if (typeof plugin.onError !== "function") continue;
+
         try {
           const recovered = await plugin.onError(
             err,
-            hookRequests.get(plugin) ?? currentReq,
+            hookRequests?.get(plugin) ?? currentReq,
             this.pluginCtx,
             ctx,
           );
+
           if (!recovery && recovered != null && isUniversalResponse(recovered)) {
             recovery = recovered as UniversalResponse<TOutput>;
           }
@@ -738,19 +862,21 @@ export class HyperCore implements IHyperCore {
           this.log("error", "[HyperCore] Error hook failed", hookError);
         }
       }
+
       if (recovery) {
-        // A response-hook failure already triggered cleanup; do not repeat those hooks.
+        // A response-hook failure already triggered cleanup.
         if (responseHooksStarted) return recovery;
+
         try {
           return await this.runResponseHooks(recovery, currentReq, ctx, plugins, hookRequests);
         } catch (responseError) {
-          // Report the new failure and finish cleanup without starting another recovery cycle.
           for (const plugin of plugins) {
             if (typeof plugin.onError !== "function") continue;
+
             try {
               await plugin.onError(
                 responseError,
-                hookRequests.get(plugin) ?? currentReq,
+                hookRequests?.get(plugin) ?? currentReq,
                 this.pluginCtx,
                 ctx,
               );
@@ -758,9 +884,11 @@ export class HyperCore implements IHyperCore {
               this.log("error", "[HyperCore] Error hook failed", hookError);
             }
           }
+
           throw responseError;
         }
       }
+
       throw err;
     }
   }
@@ -812,7 +940,7 @@ export class HyperCore implements IHyperCore {
     req: SendRequest<any, any>,
     ctx: RequestContext,
     plugins: readonly HyperPlugin[],
-    hookRequests: ReadonlyMap<HyperPlugin, SendRequest<any, any>>,
+    hookRequests?: ReadonlyMap<HyperPlugin, SendRequest<any, any>>,
   ): Promise<UniversalResponse<TOutput>> {
     let response = initialResponse;
 
@@ -820,7 +948,7 @@ export class HyperCore implements IHyperCore {
       const plugin = plugins[i]!;
       if (typeof plugin.onResponse !== "function") continue;
 
-      const hookRequest = hookRequests.get(plugin) ?? req;
+      const hookRequest = hookRequests?.get(plugin) ?? req;
       if (plugin.mode === "background") {
         const snapshot = { ...response, headers: { ...response.headers } };
         void Promise.resolve()
@@ -1043,29 +1171,6 @@ export class HyperCore implements IHyperCore {
   }
 
   /**
-   * @ru Выполняет ядро цикла запроса: prepare → send → parse через физический
-   * транспорт. Транспорт получается через `acquireTransport()`.
-   * @en Runs the core request cycle: prepare → send → parse through the physical
-   * transport. The transport is acquired via `acquireTransport()`.
-   * @param sender - The resolved protocol sender.
-   * @param req - The (possibly plugin-modified) universal request.
-   * @param ctx - The per-request execution context.
-   * @returns The normalized universal response.
-   */
-  private async runSender<TInput, TOutput>(
-    sender: HyperSender<any, any, any, any>,
-    req: SendRequest<TInput, string>,
-    ctx: RequestContext,
-  ): Promise<UniversalResponse<TOutput>> {
-    this.assertActive();
-    const transport =
-      this.transports.get(req.protocol) ?? (await this.acquireTransport(req.protocol));
-    const prepared = sender.prepare(req, ctx);
-    const raw = await sender.send(prepared, transport, ctx);
-    return sender.parse(raw, ctx) as UniversalResponse<TOutput>;
-  }
-
-  /**
    * @ru Запускает сервер для указанного протокола: связывает транспорт, ресивер и
    * application handler в цепочку receive → handle → respond.
    * @en Starts a server for the given protocol, wiring transport, receiver, and
@@ -1143,6 +1248,8 @@ export class HyperCore implements IHyperCore {
       const responseHooks = async (initial: TransportResponse): Promise<TransportResponse> => {
         let response = initial;
         for (const plugin of plugins) {
+          if (typeof plugin.onServerResponse !== "function") continue;
+
           const result = await plugin.onServerResponse?.(
             response,
             currentRequest,
@@ -1156,6 +1263,7 @@ export class HyperCore implements IHyperCore {
       const errorHooks = async (error: unknown): Promise<TransportResponse | undefined> => {
         let recovery: TransportResponse | undefined;
         for (const plugin of plugins) {
+          if (typeof plugin.onServerError !== "function") continue;
           try {
             const result = await plugin.onServerError?.(error, currentRequest, this.pluginCtx, ctx);
             if (recovery === undefined && result !== undefined) recovery = result;
@@ -1167,7 +1275,10 @@ export class HyperCore implements IHyperCore {
       };
       try {
         for (const plugin of plugins) {
-          const result = await plugin.onServerRequest?.(currentRequest, this.pluginCtx, ctx);
+          if (typeof plugin.onServerRequest !== "function") continue;
+
+          const result = await plugin.onServerRequest(currentRequest, this.pluginCtx, ctx);
+
           if (result !== undefined) {
             currentRequest = result;
             (ctx as { signal?: AbortSignal }).signal = currentRequest.signal;
@@ -1195,6 +1306,7 @@ export class HyperCore implements IHyperCore {
       }
       for (const plugin of plugins) {
         try {
+          if (typeof plugin.onServerSettled !== "function") continue;
           await plugin.onServerSettled?.(outcome, currentRequest, this.pluginCtx, ctx);
         } catch (diagnostic) {
           this.log("error", "[HyperCore] Server settlement hook failed", diagnostic);
@@ -1350,8 +1462,11 @@ export class HyperCore implements IHyperCore {
 
   private async performDestroy(graceful: boolean): Promise<void> {
     this.state = "destroying";
-    // Accepted calls finish or reject at the next admission check before resources close.
-    if (graceful) await Promise.allSettled(this.activeRequests);
+    if (graceful && this.activeRequestCount > 0) {
+      await new Promise<void>((resolve) => {
+        this.resolveActiveRequestsDrained = resolve;
+      });
+    }
 
     await Promise.allSettled(this.pendingListeners);
     for (const server of this.servers) {

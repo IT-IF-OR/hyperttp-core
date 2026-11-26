@@ -711,6 +711,95 @@ describe("HyperCore lifecycle regressions", () => {
     expect(transport.close).toHaveBeenCalledOnce();
   });
 
+  it("awaits an asynchronous parse before settling the fast path", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const parsed: UniversalResponse = {
+      protocol: "rest",
+      ok: true,
+      status: 200,
+      headers: {},
+      data: "async",
+    };
+    const outcomes: unknown[] = [];
+    const sender: HyperSender<any, any, any, any> = {
+      protocol: "rest",
+      prepare: (request: any) => request.input,
+      send: async (prepared: any) => prepared,
+      async parse(_raw: any, ctx: RequestContext) {
+        ctx.onSettled?.((outcome) => {
+          outcomes.push(outcome);
+        });
+        entered();
+        await gate;
+        return parsed;
+      },
+    };
+    const core = new HyperCore({}, makeMockTransport());
+    core.registerSender(sender);
+
+    const request = core.send({ protocol: "rest", input: { method: "GET", url: "/async-parse" } });
+    await started;
+    expect(outcomes).toEqual([]);
+    release();
+    await expect(request).resolves.toBe(parsed);
+    expect(outcomes).toEqual([{ ok: true, response: parsed }]);
+    await core.destroy();
+  });
+
+  it("settles a rejected asynchronous parse and drains it before closing the transport", async () => {
+    const failure = new Error("parse failed");
+    let rejectParse!: (error: unknown) => void;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const outcomes: unknown[] = [];
+    const sender: HyperSender<any, any, any, any> = {
+      protocol: "rest",
+      prepare: (request: any) => request.input,
+      send: async (prepared: any) => prepared,
+      parse(_raw: any, ctx: RequestContext) {
+        ctx.onSettled?.((outcome) => {
+          outcomes.push(outcome);
+        });
+        entered();
+        return new Promise<UniversalResponse>((_resolve, reject) => {
+          rejectParse = reject;
+        });
+      },
+    };
+    const transport = makeMockTransport();
+    const core = new HyperCore({}, transport);
+    core.registerSender(sender);
+
+    const request = core.send({ protocol: "rest", input: { method: "GET", url: "/reject-parse" } });
+    const failureResult = request.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await started;
+    let destroyed = false;
+    const destroying = core.destroy();
+    void destroying.then(() => {
+      destroyed = true;
+    });
+    await Promise.resolve();
+    expect(destroyed).toBe(false);
+    expect(transport.close).not.toHaveBeenCalled();
+    rejectParse(failure);
+    await expect(failureResult).resolves.toBe(failure);
+    await destroying;
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect(outcomes).toEqual([{ ok: false, error: failure }]);
+  });
+
   it("settles exactly once after recovery and isolates failing settlement callbacks", async () => {
     const outcomes: unknown[] = [];
     const core = makeCore({

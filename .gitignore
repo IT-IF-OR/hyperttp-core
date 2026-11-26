@@ -16,6 +16,7 @@ pnpm-lock.yaml
 # Output directories
 dist/
 build/
+profiles/
 
 # TypeScript
 *.tsbuildinfo

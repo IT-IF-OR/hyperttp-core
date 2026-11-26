@@ -93,6 +93,7 @@ function createClientPlugin(name, hooks = {}) {
   const plugin = { name };
   if (hooks.request) plugin.onRequest = () => undefined;
   if (hooks.response) plugin.onResponse = () => undefined;
+  if (hooks.error) plugin.onError = () => undefined;
   return plugin;
 }
 
@@ -102,6 +103,16 @@ function createServerPlugin(name, hooks = {}) {
   if (hooks.response) plugin.onServerResponse = () => undefined;
   if (hooks.settled) plugin.onServerSettled = () => undefined;
   return plugin;
+}
+
+const TRANSFORMED_REQUEST = Object.freeze({ ...REQUEST, input: Object.freeze({ value: 43 }) });
+
+function createTransformPlugin(name) {
+  return {
+    name,
+    // Returning a different object exercises request replacement and hook backfill.
+    onRequest: () => TRANSFORMED_REQUEST,
+  };
 }
 
 async function createClientCase(label, plugins = []) {
@@ -225,10 +236,14 @@ async function measureConcurrent(fn, concurrency, durationMs) {
 
   async function worker() {
     let localCount = 0;
+
     while (now() < deadline) {
-      await fn();
-      localCount++;
+      for (let i = 0; i < CHUNK_SIZE; i++) {
+        await fn();
+        localCount++;
+      }
     }
+
     return localCount;
   }
 
@@ -293,11 +308,7 @@ async function runConcurrencySuite(cases) {
   for (const testCase of cases) {
     await warmup(testCase.run, WARMUP_MS);
     for (const concurrency of CONCURRENCY_LEVELS) {
-      const result = await measureConcurrent(
-        testCase.run,
-        concurrency,
-        CONCURRENCY_DURATION_MS,
-      );
+      const result = await measureConcurrent(testCase.run, concurrency, CONCURRENCY_DURATION_MS);
       rows.push({
         scenario: testCase.label,
         concurrency,
@@ -314,10 +325,7 @@ async function runConcurrencySuite(cases) {
 }
 
 async function main() {
-  const runtime =
-    typeof Bun !== "undefined"
-      ? `Bun ${Bun.version}`
-      : `Node ${process.version}`;
+  const runtime = typeof Bun !== "undefined" ? `Bun ${Bun.version}` : `Node ${process.version}`;
 
   console.log("HyperCore microbenchmark");
   console.log(`Runtime: ${runtime} (${process.platform}/${process.arch})`);
@@ -349,11 +357,18 @@ async function main() {
     },
     await createClientCase("HyperCore / no plugins"),
     await createClientCase("HyperCore / 1 empty plugin", [createClientPlugin("empty-1")]),
+    await createClientCase(
+      "HyperCore / 16 empty plugins",
+      Array.from({ length: 16 }, (_, i) => createClientPlugin(`empty-${i + 1}`)),
+    ),
     await createClientCase("HyperCore / 1 onRequest", [
       createClientPlugin("request-1", { request: true }),
     ]),
     await createClientCase("HyperCore / 1 onResponse", [
       createClientPlugin("response-1", { response: true }),
+    ]),
+    await createClientCase("HyperCore / 1 onError", [
+      createClientPlugin("error-1", { error: true }),
     ]),
     await createClientCase("HyperCore / request + response", [
       createClientPlugin("both-1", { request: true, response: true }),
@@ -364,6 +379,23 @@ async function main() {
         createClientPlugin(`both-${i + 1}`, { request: true, response: true }),
       ),
     ),
+    await createClientCase("HyperCore / 1 onServerRequest", [
+      createServerPlugin("server-only-1", { request: true }),
+    ]),
+    await createClientCase(
+      "HyperCore / 64 server-only plugins",
+      Array.from({ length: 64 }, (_, i) =>
+        createServerPlugin(`server-only-${i + 1}`, { request: true }),
+      ),
+    ),
+    await createClientCase("HyperCore / 1 transforming onRequest", [
+      createTransformPlugin("transform-1"),
+    ]),
+    await createClientCase("HyperCore / request transform after 2 hooks", [
+      createClientPlugin("before-1", { request: true, response: true }),
+      createClientPlugin("before-2", { request: true, response: true }),
+      createTransformPlugin("transform-1"),
+    ]),
   ];
 
   const serverCases = [
@@ -378,14 +410,18 @@ async function main() {
     ]),
   ];
 
+  const concurrencyLabels = [
+    "transport.execute()",
+    "sender prepare/send/parse (no core)",
+    "HyperCore / no plugins",
+    "HyperCore / 1 onResponse",
+  ];
+
   try {
     await runSerialSuite(clientCases, "Client serial throughput and latency");
-    await runConcurrencySuite([
-      clientCases[0],
-      clientCases[1],
-      clientCases[2],
-      clientCases[5],
-    ]);
+    await runConcurrencySuite(
+      concurrencyLabels.map((label) => clientCases.find((testCase) => testCase.label === label)),
+    );
     await runSerialSuite(serverCases, "Server pipeline throughput and latency");
   } finally {
     await Promise.allSettled([
